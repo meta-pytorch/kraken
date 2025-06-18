@@ -29,10 +29,18 @@ Meta has a [bounty program](https://bugbounty.meta.com/) for the safe
 disclosure of security bugs. In those cases, please go through the process
 outlined on that page and do not file a public issue.
 
-## Coding Style  
-TBD
+## Coding Style
+`ruff==0.11.9`
+To Install ruff:
+```python
+pip install ruff==0.11.9
+```
+To run lint:
+```shell
+$ ruff format
+$ ruff check --fix
+```
 
 ## License
 By contributing to Kraken, you agree that your contributions will be licensed
 under the LICENSE file in the root directory of this source tree.
-
