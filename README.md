@@ -1,5 +1,6 @@
-# A Triton library of Symmetric Memory operators and examples. 
+# A Triton library of Symmetric Memory operators and examples.
 Make it easy to write distributed AI models with Triton.
+Initial kernels are adapted from https://github.com/yifuwang/symm-mem-recipes
 
 ## Examples
 TBD
