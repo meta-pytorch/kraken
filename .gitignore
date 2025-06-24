@@ -115,7 +115,7 @@ MANIFEST-*
 
 # setup.py intermediates
 .eggs
-caffe2.egg-info
+kraken.egg-info
 MANIFEST
 
 # Atom/Watchman required file
