@@ -1,19 +1,27 @@
-# A Triton library of Symmetric Memory operators and examples.
-Make it easy to write distributed AI models with Triton.
-Initial kernels are adapted from https://github.com/yifuwang/symm-mem-recipes
+<div align="center">
+# Kraken
+
+#### A Triton library of Symmetric Memory operators and examples.
+
+</div>
+
+This repository aims to simplify the process of developing distributed AI models using Triton and PyTorch's symmetric memory capabilities. Our initial kernels are adapted from the [Symmetric Memory Recipes](https://github.com/yifuwang/symm-mem-recipes) by Yifu Wang.
 
 ## Examples
 TBD
 
 ## Requirements
 Kraken requires:
-* triton
-* torch
+* Triton >= 3.3.0
+* PyTorch >= 2.6.0
+* Python >= 3.10
 
-## Installing Kraken
-TBD
-
-See the [CONTRIBUTING](CONTRIBUTING.md) file for how to help out.
+## Installation
+```bash
+git clone https://github.com/pytorch-labs/kraken
+cd kraken
+pip install -e . -r requirements.txt
+```
 
 ## License
-Kraken is BSD-3 licensed, as found in the LICENSE file.
+Source code is made available under a [BSD 3 license](./LICENSE), however you may have other legal obligations that govern your use of other content linked in this repository.
