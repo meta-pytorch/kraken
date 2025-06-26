@@ -5,6 +5,9 @@ import torch.distributed as dist
 import torch.distributed._symmetric_memory as symm_mem
 
 from kraken.all_reduce_fusion import triton_one_shot_all_reduce_bias
+from kraken.all_reduce_fusion.triton_two_shot_all_reduce_bias import (
+    two_shot_all_reduce_bias,
+)
 from torch.testing._internal.common_distributed import (
     MultiProcessTestCase,
     skip_if_lt_x_gpu,
@@ -63,6 +66,29 @@ class TritonAllReduceBiasTest(MultiProcessTestCase):
             bias = torch.randn(b, 5120, device=self.device, dtype=torch.bfloat16)
             y = torch.empty_like(input)
             triton_one_shot_all_reduce_bias(symm_mem_buffer, input, bias, y)
+            baseline = self._nccl_all_reduce_bias(input.clone(), bias.clone())
+
+            torch.testing.assert_close(y, baseline, rtol=5e-2, atol=5e-2)
+            dist.barrier()
+
+        dist.destroy_process_group()
+
+    @skip_if_lt_x_gpu(4)
+    def test_two_shot_bias(self):
+        self._init_process()
+
+        symm_mem_buffer = symm_mem.empty(
+            (1024, 1024),
+            dtype=torch.bfloat16,
+            device=self.device,
+        )
+        symm_mem.rendezvous(symm_mem_buffer, dist.group.WORLD)
+
+        for b in [1, 2, 4, 8, 16, 32, 64]:
+            input = torch.randn(b, 5120, device=self.device, dtype=torch.bfloat16)
+            bias = torch.randn(b, 5120, device=self.device, dtype=torch.bfloat16)
+            y = torch.empty_like(input)
+            two_shot_all_reduce_bias(symm_mem_buffer, input, bias, y)
             baseline = self._nccl_all_reduce_bias(input.clone(), bias.clone())
 
             torch.testing.assert_close(y, baseline, rtol=5e-2, atol=5e-2)

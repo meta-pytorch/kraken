@@ -10,6 +10,7 @@ import torch.distributed._symmetric_memory as symm_mem
 from kraken import _logging as log
 from kraken.all_reduce_fusion import (
     triton_one_shot_all_reduce_bias as one_shot_all_reduce_bias,
+    triton_two_shot_all_reduce_bias as two_shot_all_reduce_bias,
 )
 
 
@@ -18,6 +19,14 @@ def triton_one_shot_all_reduce_bias(
 ) -> torch.Tensor:
     y = torch.empty_like(x)
     one_shot_all_reduce_bias(symm_mem_input, x, bias, y)
+    return y
+
+
+def triton_two_shot_all_reduce_bias(
+    x: torch.Tensor, bias: torch.Tensor, symm_mem_input: torch.Tensor
+) -> torch.Tensor:
+    y = torch.empty_like(x)
+    two_shot_all_reduce_bias(symm_mem_input, x, bias, y)
     return y
 
 
@@ -49,6 +58,7 @@ def create_benchmarks(
         "nccl_ring": nccl_all_reduce_bias,
         "c10d_one_shot": c10d_one_shot_all_reduce_bias_copy_out,
         "triton_one_shot_bias_fusion": triton_one_shot_all_reduce_bias,
+        "triton_two_shot_bias_fusion": triton_two_shot_all_reduce_bias,
     }
 
     all_benchmarks = {}
