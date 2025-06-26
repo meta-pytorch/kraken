@@ -4,6 +4,9 @@ Torch symmetric memory interface. According to the benchmark, this
 two-shot all-reduce starts to outperform one-shot all-reduce when the input size
 is larger than ~150KB and starts to lose to NCCL (without fusion) when the input
 size is larger than ~15MB.
+
+
+NOTE: bias is the same across ranks for this use case as the workload is for inference.
 """
 
 import os
@@ -14,7 +17,8 @@ import torch.distributed._symmetric_memory as symm_mem
 import triton
 import triton.language as tl
 
-from .. import _logging as log, _ptx_utils as ptx_utils
+from .. import _logging as log
+from .. import _ptx_utils as ptx_utils
 
 
 @triton.jit
@@ -118,7 +122,7 @@ def two_shot_all_reduce_bias_kernel(
 
 def two_shot_all_reduce_bias(
     symm_mem_input: torch.Tensor,
-    input: torch.Tensor,
+    input_tensor: torch.Tensor,
     bias: torch.Tensor | None,
     output: torch.Tensor,
     max_num_blocks: int = 24,
@@ -131,9 +135,11 @@ def two_shot_all_reduce_bias(
     output = all_reduce(input)
     output = output + bias if bias is not None else output
 
+    NOTE: bias is the same across ranks for this use case as the workload is for inference.
+
     Args:
         symm_mem_input (torch.Tensor): The symmetric memory buffer.
-        input (torch.Tensor): The input tensor to be reduced. Must be of dtype
+        input_tensor (torch.Tensor): The input tensor to be reduced. Must be of dtype
             torch.bfloat16 and 128-bit aligned.
         bias (torch.Tensor | None): The bias tensor to be added to the reduced
             input. If None, no bias is added.
@@ -166,7 +172,7 @@ def two_shot_all_reduce_bias(
     kernel = two_shot_all_reduce_bias_kernel[(num_blocks,)](
         symm_mem_hdl.buffer_ptrs_dev,
         symm_mem_hdl.signal_pad_ptrs_dev,
-        input,
+        input_tensor,
         bias,
         output,
         numel=input.numel(),

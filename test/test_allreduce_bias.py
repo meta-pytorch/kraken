@@ -3,11 +3,6 @@ from datetime import timedelta
 import torch
 import torch.distributed as dist
 import torch.distributed._symmetric_memory as symm_mem
-
-from kraken.all_reduce_fusion import triton_one_shot_all_reduce_bias
-from kraken.all_reduce_fusion.triton_two_shot_all_reduce_bias import (
-    two_shot_all_reduce_bias,
-)
 from torch.testing._internal.common_distributed import (
     MultiProcessTestCase,
     skip_if_lt_x_gpu,
@@ -15,6 +10,11 @@ from torch.testing._internal.common_distributed import (
 from torch.testing._internal.common_utils import (
     instantiate_parametrized_tests,
     run_tests,
+)
+
+from kraken.all_reduce_fusion import triton_one_shot_all_reduce_bias
+from kraken.all_reduce_fusion.triton_two_shot_all_reduce_bias import (
+    two_shot_all_reduce_bias,
 )
 
 
@@ -62,11 +62,16 @@ class TritonAllReduceBiasTest(MultiProcessTestCase):
         symm_mem.rendezvous(symm_mem_buffer, dist.group.WORLD)
 
         for b in [1, 2, 4, 8, 16, 32, 64]:
-            input = torch.randn(b, 5120, device=self.device, dtype=torch.bfloat16)
+            torch.manual_seed(42 + self.rank + b)
+            input_tensor = torch.randn(
+                b, 5120, device=self.device, dtype=torch.bfloat16
+            )
+            # ensure the bias to be the same acorss rank
+            torch.manual_seed(42 + b)
             bias = torch.randn(b, 5120, device=self.device, dtype=torch.bfloat16)
-            y = torch.empty_like(input)
-            triton_one_shot_all_reduce_bias(symm_mem_buffer, input, bias, y)
-            baseline = self._nccl_all_reduce_bias(input.clone(), bias.clone())
+            y = torch.empty_like(input_tensor)
+            triton_one_shot_all_reduce_bias(symm_mem_buffer, input_tensor, bias, y)
+            baseline = self._nccl_all_reduce_bias(input_tensor.clone(), bias.clone())
 
             torch.testing.assert_close(y, baseline, rtol=5e-2, atol=5e-2)
             dist.barrier()
@@ -85,11 +90,16 @@ class TritonAllReduceBiasTest(MultiProcessTestCase):
         symm_mem.rendezvous(symm_mem_buffer, dist.group.WORLD)
 
         for b in [1, 2, 4, 8, 16, 32, 64]:
-            input = torch.randn(b, 5120, device=self.device, dtype=torch.bfloat16)
+            torch.manual_seed(42 + self.rank + b)
+            input_tensor = torch.randn(
+                b, 5120, device=self.device, dtype=torch.bfloat16
+            )
+            # ensure the bias to be the same acorss rank
+            torch.manual_seed(42 + b)
             bias = torch.randn(b, 5120, device=self.device, dtype=torch.bfloat16)
-            y = torch.empty_like(input)
-            two_shot_all_reduce_bias(symm_mem_buffer, input, bias, y)
-            baseline = self._nccl_all_reduce_bias(input.clone(), bias.clone())
+            y = torch.empty_like(input_tensor)
+            two_shot_all_reduce_bias(symm_mem_buffer, input_tensor, bias, y)
+            baseline = self._nccl_all_reduce_bias(input_tensor.clone(), bias.clone())
 
             torch.testing.assert_close(y, baseline, rtol=5e-2, atol=5e-2)
             dist.barrier()
