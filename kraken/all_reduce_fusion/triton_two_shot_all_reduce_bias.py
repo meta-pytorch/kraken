@@ -37,7 +37,6 @@ def two_shot_all_reduce_bias_kernel(
 ):
     pid = tl.program_id(axis=0)
     input_ptr = tl.multiple_of(input_ptr, 16)
-    bias_ptr = tl.multiple_of(bias_ptr, 16)
     output_ptr = tl.multiple_of(output_ptr, 16)
     buffer_ptrs = symm_mem_buffer_ptrs.to(tl.pointer_type(tl.uint64))
     # Note: Triton complains this is not a constexpr, but it is :(
@@ -77,6 +76,12 @@ def two_shot_all_reduce_bias_kernel(
             val = tl.load(buffer_ptr + offsets, mask=mask).to(tl.float32)
             acc += val
 
+        # NOTE: Doing this between two shots is feasible because the bias is the
+        # same across all ranks.
+        if has_bias:
+            bias_ptr = tl.multiple_of(bias_ptr, 16)
+            acc += tl.load(bias_ptr + offsets, mask=mask).to(tl.float32)
+
         for i in range(world_size):
             buffer_ptr = tl.load(buffer_ptrs + i).to(tl.pointer_type(tl.bfloat16))
             buffer_ptr = tl.multiple_of(buffer_ptr, 16)
@@ -101,12 +106,7 @@ def two_shot_all_reduce_bias_kernel(
         offsets = block_start + tl.arange(0, stride_per_program)
         mask = offsets < numel
         val = tl.load(buffer_ptr + offsets, mask=mask).to(tl.float32)
-        if has_bias:
-            bias_ptr = tl.multiple_of(bias_ptr, 16)
-            acc = tl.load(bias_ptr + offsets, mask=mask).to(tl.float32)
-        else:
-            acc = tl.zeros((stride_per_program,), dtype=tl.float32)
-        tl.store(output_ptr + offsets, val + acc, mask=mask)
+        tl.store(output_ptr + offsets, val, mask=mask)
         block_start += tl.num_programs(axis=0) * stride_per_program
 
     # Ensure that subsequent kernels do not corrupt the data before this kernel
@@ -159,12 +159,12 @@ def two_shot_all_reduce_bias(
 
     world_size = symm_mem_hdl.world_size
     num_blocks = min(
-        triton.cdiv(input.numel(), BLOCK_SIZE * world_size), max_num_blocks
+        triton.cdiv(input_tensor.numel(), BLOCK_SIZE * world_size), max_num_blocks
     )
     rank = symm_mem_hdl.rank
 
-    assert input.dtype == torch.bfloat16, "Only bfloat16 is supported for now."
-    assert input.numel() % 8 == 0, "The number of elements must be 128-bit aligned."
+    assert input_tensor.dtype == torch.bfloat16, "Only bfloat16 is supported for now."
+    assert input_tensor.numel() % 8 == 0, "The number of elements must be 128-bit aligned."
     assert BLOCK_SIZE % world_size == 0
 
     num_warps = 32
@@ -175,7 +175,7 @@ def two_shot_all_reduce_bias(
         input_tensor,
         bias,
         output,
-        numel=input.numel(),
+        numel=input_tensor.numel(),
         has_bias=bias is not None,
         stride_per_program=BLOCK_SIZE * world_size,
         rank=rank,
