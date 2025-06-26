@@ -20,7 +20,7 @@ import kraken
 
 
 @instantiate_parametrized_tests
-class TritonAllReduceTest(MultiProcessTestCase):
+class TritonAllGatherMatmulTest(MultiProcessTestCase):
     def setUp(self) -> None:
         super().setUp()
         self._spawn_processes()
@@ -46,23 +46,33 @@ class TritonAllReduceTest(MultiProcessTestCase):
         torch.manual_seed(42 + self.rank)
 
     @skip_if_lt_x_gpu(4)
-    def test_triton_one_shot(self):
+    def test_triton_all_gather_matmul(self):
         self._init_process()
+        M = 4096
+        N = 6656
+        K = 16384
+
         group_name = dist.group.WORLD.group_name
-        input_tensor = symm_mem.empty(
-            (1024, 1024),
+        a_shared = symm_mem.empty(
+            (M // self.world_size, K),
             dtype=torch.bfloat16,
             device=self.device,
+        ).normal_()
+        symm_mem.rendezvous(a_shared, group_name)
+        bT = torch.randn(
+            (K, N), device=self.device, dtype=torch.bfloat16
+        ).T.contiguous()
+        b = bT.T
+
+        ag, c = kraken.all_gather.triton_all_gather_matmul(a_shared, b)
+
+        golden_a = a_shared.clone()
+        ag_golden, mm_golden = torch.ops.symm_mem.fused_all_gather_matmul(
+            golden_a, [b], gather_dim=0, group_name=group_name
         )
-        input_tensor = input_tensor.normal_()
-        symm_mem.rendezvous(input_tensor, group_name)
 
-        result = kraken.all_reduce.triton_one_shot_all_reduce(input_tensor)
-
-        golden = input_tensor.clone()
-        dist.all_reduce(golden)
-
-        torch.testing.assert_close(result, golden, rtol=1e-1, atol=1e-1)
+        torch.testing.assert_close(c, mm_golden[0], rtol=1e-1, atol=1e-1)
+        torch.testing.assert_close(ag, ag_golden)
 
         dist.destroy_process_group()
 
