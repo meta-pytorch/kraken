@@ -164,7 +164,9 @@ def two_shot_all_reduce_bias(
     rank = symm_mem_hdl.rank
 
     assert input_tensor.dtype == torch.bfloat16, "Only bfloat16 is supported for now."
-    assert input_tensor.numel() % 8 == 0, "The number of elements must be 128-bit aligned."
+    assert input_tensor.numel() % 8 == 0, (
+        "The number of elements must be 128-bit aligned."
+    )
     assert BLOCK_SIZE % world_size == 0
 
     num_warps = 32

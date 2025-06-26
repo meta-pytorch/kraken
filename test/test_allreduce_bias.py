@@ -12,9 +12,9 @@ from torch.testing._internal.common_utils import (
     run_tests,
 )
 
-from kraken.all_reduce_fusion import triton_one_shot_all_reduce_bias
-from kraken.all_reduce_fusion.triton_two_shot_all_reduce_bias import (
-    two_shot_all_reduce_bias,
+from kraken.all_reduce_fusion import (
+    triton_one_shot_all_reduce_bias,
+    triton_two_shot_all_reduce_bias,
 )
 
 
@@ -98,7 +98,7 @@ class TritonAllReduceBiasTest(MultiProcessTestCase):
             torch.manual_seed(42 + b)
             bias = torch.randn(b, 5120, device=self.device, dtype=torch.bfloat16)
             y = torch.empty_like(input_tensor)
-            two_shot_all_reduce_bias(symm_mem_buffer, input_tensor, bias, y)
+            triton_two_shot_all_reduce_bias(symm_mem_buffer, input_tensor, bias, y)
             baseline = self._nccl_all_reduce_bias(input_tensor.clone(), bias.clone())
 
             torch.testing.assert_close(y, baseline, rtol=5e-2, atol=5e-2)
