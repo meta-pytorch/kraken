@@ -32,7 +32,7 @@ def copy_engine_all_gather_w_progress(
     backend_stream.wait_stream(torch.cuda.current_stream())
 
     with torch.cuda.stream(backend_stream):
-        for step in range(0, world_size):
+        for step in range(world_size):
             src_rank = (rank + step + 1) % world_size
             for split_id in range(splits_per_rank):
                 src_buf = symm_mem_hdl.get_buffer(

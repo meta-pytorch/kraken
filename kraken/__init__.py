@@ -1,5 +1,3 @@
-from . import all_reduce
-from . import all_gather
-from . import _logging
+from . import _logging, all_gather, all_reduce
 
-__all__ = ["all_reduce", "all_gather", "_logging"]
+__all__ = ["_logging", "all_gather", "all_reduce"]

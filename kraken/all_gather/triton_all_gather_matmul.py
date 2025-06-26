@@ -1,5 +1,3 @@
-from typing import Dict, Tuple
-
 import torch
 import torch.distributed as dist
 import torch.distributed._symmetric_memory as symm_mem
@@ -8,7 +6,6 @@ import triton.language as tl
 import triton.tools.experimental_descriptor
 
 from .._ptx_utils import wait_gmem_barrier
-
 from .copy_engine_all_gather import copy_engine_all_gather_w_progress
 
 
@@ -73,7 +70,7 @@ def _matmul_kernel_tma_persistent_w_progress(
 
     accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
 
-    for _ in range(0, k_tiles * tiles_per_SM):
+    for _ in range(k_tiles * tiles_per_SM):
         ki = tl.where(ki == k_tiles - 1, 0, ki + 1)
         if ki == 0:
             tile_id += NUM_SMS
@@ -153,7 +150,7 @@ def _matmul_w_progress(
     a_shared: torch.Tensor,
     b: torch.Tensor,
     progress: torch.Tensor,
-    configs: Dict,
+    configs: dict,
 ) -> torch.Tensor:
     M, K = a.shape
     K2, N = b.shape
@@ -239,7 +236,7 @@ def triton_all_gather_matmul(
     a_out: torch.Tensor | None = None,
     progress: torch.Tensor | None = None,
     **kwargs,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     configs = {
         "SPLITS_PER_RANK": kwargs.get("splits_per_rank", 1),
         "BLOCK_SIZE_M": kwargs.get("block_size_m", 128),

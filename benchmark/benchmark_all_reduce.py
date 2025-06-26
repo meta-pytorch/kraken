@@ -1,16 +1,12 @@
-import functools
-
-import sys
-import os
-
 import argparse
-import csv
 from collections import defaultdict
+import csv
 from dataclasses import asdict, dataclass
-from typing import Optional
+import functools
+import os
+import sys
 
 from tabulate import tabulate
-
 import torch
 import torch.distributed as dist
 import torch.distributed._symmetric_memory as symm_mem
@@ -113,16 +109,15 @@ def generate_experiment_configs(
 def get_single_backend_fn(backend: str):
     if backend == "dist_multimem":
         return symm_mem_multimem_all_reduce
-    elif backend == "dist_1shot":
+    if backend == "dist_1shot":
         return symm_mem_one_shot_all_reduce
-    elif backend == "dist_2shot":
+    if backend == "dist_2shot":
         return symm_mem_two_shot_all_reduce
-    elif backend == "triton_1shot":
+    if backend == "triton_1shot":
         return kraken.all_reduce.triton_one_shot_all_reduce
-    elif backend == "nccl":
+    if backend == "nccl":
         return nccl_ring
-    else:
-        raise NotImplementedError(backend)
+    raise NotImplementedError(backend)
 
 
 def clone_symm_mem_tensor(tensor: torch.Tensor) -> torch.Tensor:
@@ -164,7 +159,7 @@ def run_experiment(config: ExperimentConfig) -> dict[str, float]:
     return results
 
 
-def print_results(results: list[Experiment], save_path: Optional[str] = None):
+def print_results(results: list[Experiment], save_path: str | None = None):
     table_data = defaultdict(list)
 
     for experiment in results:
@@ -270,7 +265,7 @@ benchmark/benchmark_all_reduce.py
             "Error: LOCAL_RANK environment variable is not defined. Are you running with torchrun? "
         )
         print(help_str)
-        exit(1)
+        sys.exit(1)
 
     try:
         local_rank = int(os.environ["LOCAL_RANK"])
@@ -279,5 +274,5 @@ benchmark/benchmark_all_reduce.py
             "Error: LOCAL_RANK environment variable must be a valid integer. Are you running with torchrun? "
         )
         print(help_str)
-        exit(1)
+        sys.exit(1)
     main(args)

@@ -1,19 +1,16 @@
 import argparse
+from collections import defaultdict
 import csv
+from dataclasses import asdict, dataclass
 import functools
 import itertools
 import os
-
 import sys
-from collections import defaultdict
-from dataclasses import asdict, dataclass
-from typing import Optional
 
+from tabulate import tabulate
 import torch
 import torch.distributed as dist
 import torch.distributed._symmetric_memory as symm_mem
-
-from tabulate import tabulate
 
 # Add the kraken directory to the Python path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -93,12 +90,11 @@ def generate_experiment_configs(
 def get_single_backend_fn(backend: str):
     if backend == "nccl":
         return nccl_mem_ag_mm
-    elif backend == "torch_symm_mem":
+    if backend == "torch_symm_mem":
         return torch_symm_mem_ag_mm
-    elif backend == "triton":
+    if backend == "triton":
         return kraken.all_gather.triton_all_gather_matmul
-    else:
-        raise NotImplementedError(backend)
+    raise NotImplementedError(backend)
 
 
 def clone_symm_mem_tensor(tensor: torch.Tensor) -> torch.Tensor:
@@ -141,7 +137,7 @@ def run_experiment(config: ExperimentConfig) -> dict[str, float]:
     return results
 
 
-def print_results(results: list[Experiment], save_path: Optional[str] = None):
+def print_results(results: list[Experiment], save_path: str | None = None):
     table_data = defaultdict(list)
 
     for experiment in results:
@@ -271,7 +267,7 @@ benchmark/benchmark_all_gather_matmul.py
             "Error: LOCAL_RANK environment variable is not defined. Are you running with torchrun? "
         )
         print(help_str)
-        exit(1)
+        sys.exit(1)
 
     try:
         local_rank = int(os.environ["LOCAL_RANK"])
@@ -280,5 +276,5 @@ benchmark/benchmark_all_gather_matmul.py
             "Error: LOCAL_RANK environment variable must be a valid integer. Are you running with torchrun? "
         )
         print(help_str)
-        exit(1)
+        sys.exit(1)
     main(args)

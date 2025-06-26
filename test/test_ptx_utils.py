@@ -1,20 +1,18 @@
+import os
+import sys
+
 import torch
 import torch.distributed as dist
 import torch.distributed._symmetric_memory as symm_mem
-
 from torch.testing._internal.common_distributed import (
     MultiProcessTestCase,
     skip_if_lt_x_gpu,
 )
-
 from torch.testing._internal.common_utils import (
+    TestCase,
     instantiate_parametrized_tests,
     run_tests,
-    TestCase,
 )
-
-import sys
-import os
 
 # Add the parent directory to the Python path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -23,7 +21,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 import triton
 import triton.language as tl
 
-from kraken._ptx_utils import symm_mem_sync, wait_gmem_barrier, arrive_gmem_barrier
+from kraken._ptx_utils import arrive_gmem_barrier, symm_mem_sync, wait_gmem_barrier
 
 
 @instantiate_parametrized_tests
@@ -94,7 +92,6 @@ class PTXGmemBarrier(TestCase):
                 scope="gpu",
                 op="atomic_xchg",
             )
-            pass
         else:
             consumer_id = bid - NUM_PRODUCERS
             producer_id = consumer_id // (NUM_CONSUMERS // NUM_PRODUCERS)
