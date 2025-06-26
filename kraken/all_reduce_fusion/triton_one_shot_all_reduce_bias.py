@@ -72,7 +72,6 @@ def one_shot_all_reduce_bias_kernel(
         hasPreviousMemAccess=True,
         hasSubsequenceMemAccess=True,
     )
-    tl.debug_barrier()
 
     block_start = pid * BLOCK_SIZE
     while block_start < numel:
