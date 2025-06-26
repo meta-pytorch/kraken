@@ -38,8 +38,7 @@ def c10d_one_shot_all_reduce_bias_copy_out(
 
 def nccl_all_reduce_bias(x: torch.Tensor, bias: torch.Tensor) -> torch.Tensor:
     dist.all_reduce(x)
-    y = x + bias
-    return y
+    return x + bias
 
 
 def create_benchmarks(
@@ -53,6 +52,9 @@ def create_benchmarks(
 
     all_benchmarks = {}
     x = torch.randn(b, t, d_size, dtype=dtype, device=device)
+
+    # Ensure bias to be the same across ranks
+    torch.manual_seed(42)
     bias = torch.randn(b, t, d_size, dtype=dtype, device=device)
 
     for k, v in all_functions.items():
@@ -71,6 +73,8 @@ def create_benchmarks(
 @torch.no_grad()
 def benchmark(device: torch.device, b: int, t: int, d_size: int) -> dict[str, float]:
     """
+    Note that bias are the same across all ranks for this workload.
+
     dist.all_reduce(x)
     y = x + bias
     """

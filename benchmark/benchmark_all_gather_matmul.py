@@ -3,6 +3,7 @@ from collections import defaultdict
 import csv
 from dataclasses import asdict, dataclass
 import functools
+import itertools
 import os
 import sys
 
@@ -18,48 +19,23 @@ import kraken
 from kraken._logging import benchmark_with_event
 
 
-def symm_mem_multimem_all_reduce(msg):
-    return torch.ops.symm_mem.multimem_all_reduce_(
-        msg,
-        "sum",
-        dist.group.WORLD.group_name,
+def torch_symm_mem_ag_mm(a_shared, b):
+    a_gathered, c = torch.ops.symm_mem.fused_all_gather_matmul(
+        a_shared, [b], gather_dim=0, group_name=dist.group.WORLD.group_name
     )
+    return a_gathered, c[0]
 
 
-def symm_mem_one_shot_all_reduce(msg):
-    return torch.ops.symm_mem.one_shot_all_reduce(
-        msg,
-        "sum",
-        dist.group.WORLD.group_name,
-    )
+def nccl_mem_ag_mm(a_shared, b):
+    from torch.distributed._functional_collectives import all_gather_tensor
 
-
-def symm_mem_two_shot_all_reduce(msg):
-    return torch.ops.symm_mem.two_shot_all_reduce_(
-        msg,
-        "sum",
-        dist.group.WORLD.group_name,
-    )
-
-
-def nccl_ring(msg):
-    dist.all_reduce(msg)
-    return msg
-
-
-def formatt_large_number(num: int) -> str:
-    if num >= 2**30:
-        return f"{num / 2**30:.0f}g"
-    if num >= 2**20:
-        return f"{num / 2**20:.0f}m"
-    if num >= 2**10:
-        return f"{num / 2**10:.0f}k"
-    return str(num)
+    a_gathered = all_gather_tensor(a_shared, 0, "0")
+    return a_gathered, torch.matmul(a_gathered, b)
 
 
 @dataclass(frozen=True)
 class ExperimentConfig:
-    shape: tuple[int]
+    shape: tuple[int, int, int]
     dtype: torch.dtype
     backends: list[str]
     baseline_backend: str
@@ -71,9 +47,6 @@ class ExperimentConfig:
         d.pop("backends", None)
         d.pop("device", None)
         d.pop("baseline_backend", None)
-
-        formated_size = [formatt_large_number(num) for num in self.shape]
-        d["shape"] = f"({', '.join(formated_size)})"
         return d
 
 
@@ -89,13 +62,21 @@ class Experiment:
 
 
 def generate_experiment_configs(
-    dtype: torch.dtype, sizes: list[int], backends: list[str], device: torch.device
+    dtype: torch.dtype,
+    M: list[int],
+    N: list[int],
+    K: list[int],
+    backends: list[str],
+    device: torch.device,
 ) -> list[ExperimentConfig]:
+    # Generate cross config shapes from M, N, K lists
+    shapes = list(itertools.product(M, N, K))
+
     all_configs = []
-    for sz in sizes:
+    for shape in shapes:
         all_configs.append(
             ExperimentConfig(
-                shape=(sz,),
+                shape=shape,
                 dtype=dtype,
                 backends=backends,
                 baseline_backend=backends[0],
@@ -107,16 +88,12 @@ def generate_experiment_configs(
 
 
 def get_single_backend_fn(backend: str):
-    if backend == "dist_multimem":
-        return symm_mem_multimem_all_reduce
-    if backend == "dist_1shot":
-        return symm_mem_one_shot_all_reduce
-    if backend == "dist_2shot":
-        return symm_mem_two_shot_all_reduce
-    if backend == "triton_1shot":
-        return kraken.all_reduce.triton_one_shot_all_reduce
     if backend == "nccl":
-        return nccl_ring
+        return nccl_mem_ag_mm
+    if backend == "torch_symm_mem":
+        return torch_symm_mem_ag_mm
+    if backend == "triton":
+        return kraken.all_gather.triton_all_gather_matmul
     raise NotImplementedError(backend)
 
 
@@ -132,28 +109,29 @@ def clone_symm_mem_tensor(tensor: torch.Tensor) -> torch.Tensor:
 
 
 def run_experiment(config: ExperimentConfig) -> dict[str, float]:
-    input_tensor = symm_mem.empty(
-        config.shape,
+    M, N, K = config.shape
+    a = symm_mem.empty(
+        (M, K),
         dtype=config.dtype,
         device=config.device,
-    )
-    symm_mem.rendezvous(input_tensor, dist.group.WORLD.group_name)
-    input_tensor = input_tensor.normal_()
-    input_tensors = {
-        backend: clone_symm_mem_tensor(input_tensor) for backend in config.backends
-    }
-    gloden_inp = clone_symm_mem_tensor(input_tensor)
+    ).normal_()
+    b = torch.randn((K, N), device=config.device, dtype=config.dtype).T.contiguous().T
+    symm_mem.rendezvous(a, dist.group.WORLD.group_name)
 
-    gloden_o = get_single_backend_fn(config.baseline_backend)(gloden_inp)
+    input_tensors = {backend: clone_symm_mem_tensor(a) for backend in config.backends}
+    gloden_inp = clone_symm_mem_tensor(a)
+
+    gloden_o = get_single_backend_fn(config.baseline_backend)(gloden_inp, b)
 
     results = {}
     for backend in config.backends:
         fn = get_single_backend_fn(backend)
         inp = input_tensors[backend]
-        target_fn = functools.partial(fn, inp)
-        test_o = target_fn()
-        torch.testing.assert_close(test_o, gloden_o, atol=1e-1, rtol=1e-1)
 
+        test_o = fn(inp, b)
+        torch.testing.assert_close(test_o[1], gloden_o[1], atol=1e-1, rtol=1e-1)
+
+        target_fn = functools.partial(fn, inp, b)
         results[backend] = benchmark_with_event(target_fn, flush_l2=True)
 
     return results
@@ -198,7 +176,9 @@ def main(args):
     torch.manual_seed(42 + local_rank)
 
     results = []
-    configs = generate_experiment_configs(args.dtype, args.size, args.backend, device)
+    configs = generate_experiment_configs(
+        args.dtype, args.M, args.N, args.K, args.backend, device
+    )
     for config in configs:
         results.append(
             Experiment(
@@ -211,6 +191,14 @@ def main(args):
     dist.destroy_process_group()
 
 
+def shape_input_type(s):
+    try:
+        M, N, K = map(int, s.split(","))
+        return M, N, K
+    except Exception as e:
+        raise argparse.ArgumentTypeError("Heads must be Hq,Hkv") from e
+
+
 if __name__ == "__main__":
     help_str = """
 Run with torchrun
@@ -218,7 +206,7 @@ torchrun \
 --nnodes 1 --nproc-per-node 8 \
 --rdzv-backend c10d --rdzv-endpoint localhost:0 \
 --no_python python3 \
-benchmark/benchmark_all_reduce.py
+benchmark/benchmark_all_gather_matmul.py
 """
 
     # Set up the argument parser
@@ -232,21 +220,35 @@ benchmark/benchmark_all_reduce.py
         nargs="+",
         choices=[
             "nccl",
-            "triton_1shot",
-            "dist_multimem",
-            "dist_1shot",
-            "dist_2shot",
+            "torch_symm_mem",
+            "triton",
         ],
-        default=["nccl", "triton_1shot", "dist_multimem"],
-        help="Backend to use for AllReduce. Use first backend as baseline. ",
+        default=["nccl", "torch_symm_mem", "triton"],
+        help="Backend to use for AllGather Matmul. Use first backend as baseline. ",
     )
 
     parser.add_argument(
-        "--size",
-        type=int,
+        "-M",
+        type=shape_input_type,
         nargs="+",
-        default=[2**exp for exp in range(12, 21)],
-        help="Tensor lengths",
+        default=[2**x for x in range(7, 11)],
+        help="matmul shapes: (M, N, K). (M, K) @ (K, N) -> (M, N)",
+    )
+
+    parser.add_argument(
+        "-N",
+        type=shape_input_type,
+        nargs="+",
+        default=[6656],
+        help="matmul shapes: (M, N, K). (M, K) @ (K, N) -> (M, N)",
+    )
+
+    parser.add_argument(
+        "-K",
+        type=shape_input_type,
+        nargs="+",
+        default=[2**x for x in range(12, 15)],
+        help="matmul shapes: (M, N, K). (M, K) @ (K, N) -> (M, N)",
     )
 
     parser.add_argument("-dtype", type=str, help="dtype", default="bfloat16")
