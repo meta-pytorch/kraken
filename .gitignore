@@ -21,6 +21,9 @@ coverage.xml
 .lintrunner.private.toml
 log
 
+# Our benchmark will generate png files
+*.png
+
 # IPython notebook checkpoints
 .ipynb_checkpoints
 
