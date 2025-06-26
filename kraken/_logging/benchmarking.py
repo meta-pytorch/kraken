@@ -1,7 +1,7 @@
+from contextlib import nullcontext
 import os
 import re
-from contextlib import nullcontext
-from typing import Callable, List, Optional
+from typing import Callable
 
 import torch
 import torch.distributed as dist
@@ -12,7 +12,7 @@ def benchmark_with_profiler(
     event_key_regex: str,
     warmup_iters: int = 200,
     benchmark_iters: int = 100,
-    profile_ranks: Optional[List[int]] = None,
+    profile_ranks: list[int] | None = None,
     flush_l2: bool = False,
 ) -> float:
     """
@@ -68,7 +68,7 @@ def benchmark_with_profiler(
 
     with prof:
         torch.cuda._sleep(int(2e7))
-        for i in range(benchmark_iters):
+        for _ in range(benchmark_iters):
             if flush_l2:
                 cache.zero_()
             target_fn()
@@ -92,7 +92,7 @@ def benchmark_with_event(
     target_fn: Callable[[None], None],
     warmup_iters: int = 200,
     benchmark_iters: int = 25,
-    profile_ranks: Optional[List[int]] = None,
+    profile_ranks: list[int] | None = None,
     flush_l2: bool = False,
     cuda_graph: bool = False,
 ) -> float:
@@ -157,5 +157,7 @@ def benchmark_with_event(
             end_events[i].record()
         torch.cuda.synchronize()
 
-    latencies = [b.elapsed_time(e) for b, e in zip(begin_events, end_events)]
+    latencies = [
+        b.elapsed_time(e) for b, e in zip(begin_events, end_events, strict=False)
+    ]
     return torch.tensor(latencies).median().item() * 1000

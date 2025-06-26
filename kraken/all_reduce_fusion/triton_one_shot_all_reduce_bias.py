@@ -1,6 +1,8 @@
 """
 This module demonstrates the usage of fusing one_shot all_reduce with bias addition,
 which is used by certain models, using PyTorch symmetric memory interface.
+
+NOTE: bias is the same across ranks for this use case as the workload is for inference.
 """
 
 import os
@@ -11,7 +13,8 @@ import torch.distributed._symmetric_memory as symm_mem
 import triton
 import triton.language as tl
 
-from .. import _logging as log, _ptx_utils as ptx_utils
+from .. import _logging as log
+from .. import _ptx_utils as ptx_utils
 
 
 @triton.jit
@@ -102,7 +105,7 @@ def one_shot_all_reduce_bias_kernel(
 
 def one_shot_all_reduce_bias(
     symm_mem_buffer: torch.Tensor,
-    input: torch.Tensor,
+    input_tensor: torch.Tensor,
     bias: torch.Tensor | None,
     output: torch.Tensor,
     max_num_blocks: int = 24,
@@ -115,13 +118,15 @@ def one_shot_all_reduce_bias(
     output = all_reduce(input)
     output = output + bias if bias is not None else output
 
+    NOTE: that bias is assumed to be the same as this use case is for inference.
+
     This kernel uses a persistent execution style, launching up to 24 blocks,
     with blocks iterating over the input tensor until all elements are
     processed.
 
     Args:
         symm_mem_buffer (torch.Tensor): The symmetric memory buffer.
-        input (torch.Tensor): The input tensor to be reduced. Must be of dtype
+        input_tensor (torch.Tensor): The input tensor to be reduced. Must be of dtype
             torch.bfloat16 and 128-bit aligned.
         bias (torch.Tensor | None): The bias tensor to be added to the reduced
             input. If None, no bias is added.
@@ -140,21 +145,23 @@ def one_shot_all_reduce_bias(
     group = group or dist.group.WORLD
     symm_mem_hdl = symm_mem.rendezvous(symm_mem_buffer, group=group)
     if symm_mem_hdl is None:
-        raise ValueError(f"symm_mem_buffer much be a valid symmetric memory tensor.")
-    num_blocks = min(triton.cdiv(input.numel(), BLOCK_SIZE), max_num_blocks)
+        raise ValueError("symm_mem_buffer much be a valid symmetric memory tensor.")
+    num_blocks = min(triton.cdiv(input_tensor.numel(), BLOCK_SIZE), max_num_blocks)
 
-    assert input.dtype == torch.bfloat16, "Only bfloat16 is supported for now."
-    assert input.numel() % 8 == 0, "The number of elements must be 128-bit aligned."
+    assert input_tensor.dtype == torch.bfloat16, "Only bfloat16 is supported for now."
+    assert input_tensor.numel() % 8 == 0, (
+        "The number of elements must be 128-bit aligned."
+    )
 
     num_warps = 32
 
     kernel = one_shot_all_reduce_bias_kernel[(num_blocks,)](
         symm_mem_hdl.buffer_ptrs_dev,
         symm_mem_hdl.signal_pad_ptrs_dev,
-        input,
+        input_tensor,
         bias,
         output,
-        numel=input.numel(),
+        numel=input_tensor.numel(),
         has_bias=bias is not None,
         world_size=symm_mem_hdl.world_size,
         rank=symm_mem_hdl.rank,
