@@ -121,8 +121,10 @@ def gemm_one_shot_all_reduce(
     assert (
         a.shape[1] == b.shape[0]
     ), "Inner dimensions must match for matrix multiplication"
+
     M, K = a.shape
     K, N = b.shape
+
     # Configuration
     BLOCK_SIZE_M = kwargs.get("BLOCK_SIZE_M", 64)
     BLOCK_SIZE_N = kwargs.get("BLOCK_SIZE_N", 64)
@@ -135,8 +137,8 @@ def gemm_one_shot_all_reduce(
     # Create a buffer for local GEMM results in symmetric memory
     gemm_buffer = symm_mem.empty((M, N), dtype=torch.float32, device=a.device)
     symm_mem_hdl = symm_mem.rendezvous(gemm_buffer, group=dist.group.WORLD)
-    # Launch kernel
 
+    # Launch kernel
     def grid(META):
         return (
             triton.cdiv(M, META["BLOCK_SIZE_M"]) * triton.cdiv(N, META["BLOCK_SIZE_N"]),
