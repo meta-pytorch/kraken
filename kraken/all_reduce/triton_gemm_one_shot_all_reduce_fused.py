@@ -56,7 +56,7 @@ def gemm_one_shot_all_reduce_kernel(
     acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
 
     # GEMM computation
-    for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
+    for k in range(tl.cdiv(K, BLOCK_SIZE_K)):
         a = tl.load(a_ptrs, mask=offs_k[None, :] < K - k * BLOCK_SIZE_K, other=0.0)
         b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
         acc = tl.dot(a, b, acc)
@@ -121,7 +121,6 @@ def gemm_one_shot_all_reduce(
     assert (
         a.shape[1] == b.shape[0]
     ), "Inner dimensions must match for matrix multiplication"
-    
     M, K = a.shape
     K, N = b.shape
     # Configuration
@@ -137,9 +136,11 @@ def gemm_one_shot_all_reduce(
     gemm_buffer = symm_mem.empty((M, N), dtype=torch.float32, device=a.device)
     symm_mem_hdl = symm_mem.rendezvous(gemm_buffer, group=dist.group.WORLD)
     # Launch kernel
-    grid = lambda META: (
-        triton.cdiv(M, META["BLOCK_SIZE_M"]) * triton.cdiv(N, META["BLOCK_SIZE_N"]),
-    )
+
+    def grid(META):
+        return (
+            triton.cdiv(M, META["BLOCK_SIZE_M"]) * triton.cdiv(N, META["BLOCK_SIZE_N"]),
+        )
 
     gemm_one_shot_all_reduce_kernel[grid](
         a,
