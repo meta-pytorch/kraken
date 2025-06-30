@@ -66,6 +66,26 @@ class TritonAllReduceTest(MultiProcessTestCase):
 
         dist.destroy_process_group()
 
+    @skip_if_lt_x_gpu(4)
+    def test_gemm_all_reduce(self):
+        self._init_process()
+        M, N, K = 512, 256, 128
+
+        # create a and b local tensors
+        a = torch.empty((M, K), dtype=torch.float32, device=self.device).normal_()
+        b = torch.empty((K, N), dtype=torch.float32, device=self.device).normal_()
+
+        # calculate result for our fused kernel
+        result = kraken.all_reduce.triton_gemm_one_shot_all_reduce_fused(a, b)
+
+        # expected value
+        expected = torch.matmul(a, b)
+        dist.all_reduce(expected)
+
+        # compare result and expected
+        torch.testing.assert_close(result, expected, rtol=1e-1, atol=1e-1)
+        dist.destroy_process_group()
+
 
 if __name__ == "__main__":
     run_tests()
