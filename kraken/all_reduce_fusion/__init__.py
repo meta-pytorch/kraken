@@ -9,9 +9,14 @@ from .triton_two_shot_all_reduce_bias import (
     two_shot_all_reduce_bias as triton_two_shot_all_reduce_bias,
 )
 
+from .triton_two_shot_all_reduce_bias_rms_norm import (
+    two_shot_all_reduce_bias_rms_norm as triton_two_shot_all_reduce_bias_rms_norm,
+)
+
 __all__ = [
     "rms_norm",
     "triton_one_shot_all_reduce_bias",
     "triton_one_shot_all_reduce_bias_rms_norm",
     "triton_two_shot_all_reduce_bias",
+    "triton_two_shot_all_reduce_bias_rms_norm",
 ]

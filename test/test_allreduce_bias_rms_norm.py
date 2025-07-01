@@ -3,8 +3,6 @@ from datetime import timedelta
 import torch
 import torch.distributed as dist
 import torch.distributed._symmetric_memory as symm_mem
-
-from kraken.all_reduce_fusion import rms_norm, triton_one_shot_all_reduce_bias_rms_norm
 from torch.testing._internal.common_distributed import (
     MultiProcessTestCase,
     skip_if_lt_x_gpu,
@@ -12,6 +10,12 @@ from torch.testing._internal.common_distributed import (
 from torch.testing._internal.common_utils import (
     instantiate_parametrized_tests,
     run_tests,
+)
+
+from kraken.all_reduce_fusion import (
+    rms_norm,
+    triton_one_shot_all_reduce_bias_rms_norm,
+    triton_two_shot_all_reduce_bias_rms_norm,
 )
 
 
@@ -50,7 +54,7 @@ class TritonAllReduceBiasRMSNormTest(MultiProcessTestCase):
         return rms_norm(x + bias, w)
 
     @skip_if_lt_x_gpu(4)
-    def test_two_shot_bias_rms_norm(self):
+    def test_one_shot_bias_rms_norm(self):
         self._init_process()
 
         symm_mem_buffer = symm_mem.empty(
@@ -71,6 +75,39 @@ class TritonAllReduceBiasRMSNormTest(MultiProcessTestCase):
             w = torch.randn(5120, device=self.device, dtype=torch.bfloat16)
             y = torch.empty_like(input_tensor)
             triton_one_shot_all_reduce_bias_rms_norm(
+                symm_mem_buffer, input_tensor, bias, w, y
+            )
+            baseline = self._nccl_all_reduce_bias_rms_norm(
+                input_tensor.clone(), w.clone(), bias.clone()
+            )
+
+            torch.testing.assert_close(y, baseline, rtol=4e-2, atol=4e-2)
+            dist.barrier()
+
+        dist.destroy_process_group()
+
+    @skip_if_lt_x_gpu(4)
+    def test_two_shot_bias_rms_norm(self):
+        self._init_process()
+
+        symm_mem_buffer = symm_mem.empty(
+            (1024, 1024),
+            dtype=torch.bfloat16,
+            device=self.device,
+        )
+        symm_mem.rendezvous(symm_mem_buffer, dist.group.WORLD)
+
+        for b in [1, 2, 4, 8, 16, 32, 64]:
+            torch.manual_seed(42 + self.rank + b)
+            input_tensor = torch.randn(
+                b, 5120, device=self.device, dtype=torch.bfloat16
+            )
+            # ensure the bias to be the same acorss rank
+            torch.manual_seed(42 + b)
+            bias = torch.randn(b, 5120, device=self.device, dtype=torch.bfloat16)
+            w = torch.randn(5120, device=self.device, dtype=torch.bfloat16)
+            y = torch.empty_like(input_tensor)
+            triton_two_shot_all_reduce_bias_rms_norm(
                 symm_mem_buffer, input_tensor, bias, w, y
             )
             baseline = self._nccl_all_reduce_bias_rms_norm(
