@@ -8,12 +8,19 @@ import torch.distributed as dist
 import torch.distributed._symmetric_memory as symm_mem
 
 from kraken import _logging as log
-
 from kraken.all_reduce_fusion import (
     rms_norm,
+)
+from kraken.all_reduce_fusion import (
     triton_one_shot_all_reduce_bias as one_shot_all_reduce_bias,
+)
+from kraken.all_reduce_fusion import (
     triton_one_shot_all_reduce_bias_rms_norm as one_shot_all_reduce_bias_rms_norm,
+)
+from kraken.all_reduce_fusion import (
     triton_two_shot_all_reduce_bias as two_shot_all_reduce_bias,
+)
+from kraken.all_reduce_fusion import (
     triton_two_shot_all_reduce_bias_rms_norm as two_shot_all_reduce_bias_rms_norm,
 )
 

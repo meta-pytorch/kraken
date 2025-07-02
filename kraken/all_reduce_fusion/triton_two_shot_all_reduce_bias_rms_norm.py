@@ -18,10 +18,10 @@ import torch.distributed as dist
 import torch.distributed._symmetric_memory as symm_mem
 import triton
 import triton.language as tl
-
 from triton.language.math import rsqrt as tl_rsqrt
 
-from .. import _logging as log, _ptx_utils as ptx_utils
+from .. import _logging as log
+from .. import _ptx_utils as ptx_utils
 
 
 @triton.jit
@@ -126,7 +126,7 @@ def two_shot_all_reduce_bias_rms_norm_kernel(
     )
 
 
-def two_shot_all_reduce_bias_rms_norm(
+def triton_two_shot_all_reduce_bias_rms_norm(
     symm_mem_input: torch.Tensor,
     x: torch.Tensor,
     bias: torch.Tensor,

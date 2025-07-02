@@ -1,7 +1,6 @@
 import atexit
 import tempfile
 
-import matplotlib.pyplot as plt
 import torch.distributed as dist
 
 triton_kernels = {}
@@ -38,6 +37,7 @@ def plot_experiment_comparison(
         data: The data to plot.
         filename: The filename to save the plot to.
     """
+    import matplotlib.pyplot as plt
 
     # Prepare X-axis labels
     x_pos = range(len(sizes))
