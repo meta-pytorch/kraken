@@ -9,7 +9,7 @@ from .. import _ptx_utils as ptx_utils
 
 @triton.jit
 def one_shot_all_reduce_kernel(
-    buffer_ptr_addrs,
+    buf_tuple,
     signal_pad_ptrs,
     output_ptr,
     numel: tl.constexpr,
@@ -22,8 +22,6 @@ def one_shot_all_reduce_kernel(
     )
 
     pid = tl.program_id(axis=0)
-    buffer_ptr_addrs = buffer_ptr_addrs.to(tl.pointer_type(tl.uint64))
-    output_ptr = output_ptr.to(tl.pointer_type(tl.bfloat16))
     block_start = pid * BLOCK_SIZE
 
     while block_start < numel:
@@ -32,10 +30,9 @@ def one_shot_all_reduce_kernel(
         mask = offsets < numel
 
         acc = tl.zeros((BLOCK_SIZE,), dtype=tl.bfloat16)
-        for i in range(world_size):
-            buffer_ptr = tl.load(buffer_ptr_addrs + i).to(tl.pointer_type(tl.bfloat16))
-            tl.multiple_of(buffer_ptr, 16)
-            x = tl.load(buffer_ptr + offsets, mask=mask)
+        for i in tl.static_range(world_size):
+            buffer_rank = buf_tuple[i]
+            x = tl.load(buffer_rank + offsets, mask=mask)
             acc += x
         tl.store(output_ptr + offsets, acc, mask=mask)
         block_start += tl.num_programs(axis=0) * BLOCK_SIZE
@@ -65,8 +62,14 @@ def one_shot_all_reduce(tensor: torch.Tensor, **kwargs) -> torch.Tensor:
     symm_mem_hdl = symm_mem.rendezvous(tensor, group=dist.group.WORLD)
     output = torch.empty_like(tensor)
 
+    buf_list = [
+        symm_mem_hdl.get_buffer(i, tuple(tensor.shape), tensor.dtype)
+        for i in range(symm_mem_hdl.world_size)
+    ]
+    buf_tuple = tuple(buf_list)
+
     one_shot_all_reduce_kernel[(num_blocks, 1, 1)](
-        symm_mem_hdl.buffer_ptrs_dev,
+        buf_tuple,
         symm_mem_hdl.signal_pad_ptrs_dev,
         output,
         numel=tensor.numel(),
