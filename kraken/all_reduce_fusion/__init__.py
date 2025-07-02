@@ -1,3 +1,4 @@
 from .triton_one_shot_all_reduce_bias import triton_one_shot_all_reduce_bias
+from .triton_two_shot_all_reduce_bias import triton_two_shot_all_reduce_bias
 
-__all__ = ["triton_one_shot_all_reduce_bias"]
+__all__ = ["triton_one_shot_all_reduce_bias", "triton_two_shot_all_reduce_bias"]
