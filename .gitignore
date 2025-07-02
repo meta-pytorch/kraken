@@ -21,6 +21,9 @@ coverage.xml
 .lintrunner.private.toml
 log
 
+# Kraken benchmarks may generate PNG files
+*.png
+
 # IPython notebook checkpoints
 .ipynb_checkpoints
 
