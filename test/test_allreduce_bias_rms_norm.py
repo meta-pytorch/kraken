@@ -3,8 +3,6 @@ from datetime import timedelta
 import torch
 import torch.distributed as dist
 import torch.distributed._symmetric_memory as symm_mem
-
-from kraken.all_reduce_fusion import rms_norm, triton_one_shot_all_reduce_bias_rms_norm
 from torch.testing._internal.common_distributed import (
     MultiProcessTestCase,
     skip_if_lt_x_gpu,
@@ -13,6 +11,8 @@ from torch.testing._internal.common_utils import (
     instantiate_parametrized_tests,
     run_tests,
 )
+
+from kraken.all_reduce_fusion import rms_norm, triton_one_shot_all_reduce_bias_rms_norm
 
 
 @instantiate_parametrized_tests
