@@ -47,6 +47,9 @@ def two_shot_all_reduce_bias_rms_norm_kernel(
     bt_idx = row_idx // H
     h_idx = row_idx % H
     col_offsets = tl.arange(0, triton.next_power_of_2(D))
+
+    # Each block has to compute the RMSNorm one row per time, and
+    # the row size is D.
     mask = col_offsets < D
 
     input_ptr = tl.multiple_of(input_ptr, 16)
