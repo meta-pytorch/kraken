@@ -20,6 +20,9 @@ from kraken.all_reduce_fusion import (
 from kraken.all_reduce_fusion import (
     triton_two_shot_all_reduce_bias as two_shot_all_reduce_bias,
 )
+from kraken.all_reduce_fusion import (
+    triton_two_shot_all_reduce_bias_rms_norm as two_shot_all_reduce_bias_rms_norm,
+)
 
 
 def triton_one_shot_all_reduce_bias_rms_norm(x, bias, rms_weight, symm_mem_input):
@@ -32,6 +35,12 @@ def triton_one_shot_all_reduce_bias_with_rms_norm(x, bias, rms_weight, symm_mem_
     y = torch.empty_like(x)
     one_shot_all_reduce_bias(symm_mem_input, x, bias, y)
     return rms_norm(y, rms_weight)
+
+
+def triton_two_shot_all_reduce_bias_rms_norm(x, bias, rms_weight, symm_mem_input):
+    y = torch.empty_like(x)
+    two_shot_all_reduce_bias_rms_norm(symm_mem_input, x, bias, rms_weight, y)
+    return y
 
 
 def triton_two_shot_all_reduce_bias_with_rms_norm(x, bias, rms_weight, symm_mem_input):
@@ -59,6 +68,7 @@ def create_benchmarks(b, t, d_size, device, dtype):
         "triton_one_shot_bias_fused + rms_norm": triton_one_shot_all_reduce_bias_with_rms_norm,
         "triton_two_shot_bias_fused + rms_norm": triton_two_shot_all_reduce_bias_with_rms_norm,
         "triton_one_shot_bias_rms_norm_fused": triton_one_shot_all_reduce_bias_rms_norm,
+        "triton_two_shot_bias_rms_norm_fused": triton_two_shot_all_reduce_bias_rms_norm,
     }
     all_benchmarks = {}
     for k, v in all_functions.items():
