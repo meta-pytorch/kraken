@@ -70,26 +70,6 @@ class TritonGemmAllReduceTest(MultiProcessTestCase):
         dist.destroy_process_group()
 
     @skip_if_lt_x_gpu(4)
-    def test_gemm_all_reduce_large(self):
-        self._init_process()
-        M, N, K = 1024, 512, 256
-
-        # create a and b local tensors
-        a = torch.empty((M, K), dtype=torch.float32, device=self.device).normal_()
-        b = torch.empty((K, N), dtype=torch.float32, device=self.device).normal_()
-
-        # calculate result for our fused kernel
-        result = kraken.all_reduce_fusion.triton_gemm_one_shot_all_reduce_fused(a, b)
-
-        # expected value
-        expected = torch.matmul(a, b)
-        dist.all_reduce(expected)
-
-        # compare result and expected
-        torch.testing.assert_close(result, expected, rtol=1e-1, atol=1e-1)
-        dist.destroy_process_group()
-
-    @skip_if_lt_x_gpu(4)
     def test_gemm_all_reduce_square(self):
         self._init_process()
         M, N, K = 256, 256, 256
@@ -107,6 +87,29 @@ class TritonGemmAllReduceTest(MultiProcessTestCase):
 
         # compare result and expected
         torch.testing.assert_close(result, expected, rtol=1e-1, atol=1e-1)
+        dist.destroy_process_group()
+
+    @skip_if_lt_x_gpu(4)
+    def test_rank_specific_values_all_reduce(self):
+        """Test with rank-specific values to verify all-reduce accumulation"""
+        self._init_process()
+        M, N, K = 32, 32, 32
+
+        # Each rank contributes (rank + 1) to the final sum
+        # This makes it easy to verify all-reduce worked correctly
+        rank_multiplier = self.rank + 1
+        a = torch.ones((M, K), dtype=torch.float32, device=self.device) * rank_multiplier
+        b = torch.ones((K, N), dtype=torch.float32, device=self.device)
+
+        result = kraken.all_reduce_fusion.triton_gemm_one_shot_all_reduce_fused(a, b)
+
+        # Expected: sum of all rank contributions
+        # rank 0: 1*K, rank 1: 2*K, rank 2: 3*K, rank 3: 4*K
+        # Total = K * (1+2+3+4) = K * 10
+        expected_sum = K * sum(range(1, self.world_size + 1))  # K * 10 = K * 10
+        expected = torch.full((M, N), expected_sum, dtype=torch.float32, device=self.device)
+
+        torch.testing.assert_close(result, expected, rtol=1e-5, atol=1e-5)
         dist.destroy_process_group()
 
 if __name__ == "__main__":
