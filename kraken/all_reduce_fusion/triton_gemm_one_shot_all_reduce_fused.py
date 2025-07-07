@@ -11,7 +11,7 @@ from .. import _ptx_utils as ptx_utils
 def gemm_one_shot_all_reduce_kernel(
     a_ptr,
     b_ptr,
-    buffer_ptr_addrs,
+    buf_tuple,
     signal_pad_ptrs,
     output_ptr,
     M: tl.constexpr,
@@ -69,11 +69,8 @@ def gemm_one_shot_all_reduce_kernel(
     offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
     mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
 
-    # Convert buffer address list to pointer type for uint64
-    buffer_ptr_addrs = buffer_ptr_addrs.to(tl.pointer_type(tl.uint64))
-
-    # Load this rank's base pointer into symmetric buffer
-    my_buffer_ptr = tl.load(buffer_ptr_addrs + rank).to(tl.pointer_type(tl.float32))
+    # Get this rank's buffer from the tuple
+    my_buffer_ptr = buf_tuple[rank]
 
     # Compute addresses in symmetric buffer for each element and store tile result into symmem
     c_ptrs = my_buffer_ptr + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :]
@@ -86,10 +83,10 @@ def gemm_one_shot_all_reduce_kernel(
 
     # All-reduce: sum results from all ranks
     acc_reduce = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
-    for i in range(world_size):
-        buffer_ptr = tl.load(buffer_ptr_addrs + i).to(tl.pointer_type(tl.float32))
+    for i in tl.static_range(world_size):
+        buffer_rank = buf_tuple[i]
         c_ptrs = (
-            buffer_ptr + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :]
+            buffer_rank + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :]
         )
         c_block = tl.load(c_ptrs, mask=mask, other=0.0)
         acc_reduce += c_block
@@ -138,6 +135,13 @@ def gemm_one_shot_all_reduce(
     gemm_buffer = symm_mem.empty((M, N), dtype=torch.float32, device=a.device)
     symm_mem_hdl = symm_mem.rendezvous(gemm_buffer, group=dist.group.WORLD)
 
+    # Create buffer tuple for all ranks
+    buf_list = [
+        symm_mem_hdl.get_buffer(i, tuple((M, N)), torch.float32)
+        for i in range(symm_mem_hdl.world_size)
+    ]
+    buf_tuple = tuple(buf_list)
+
     # Launch kernel
     def grid(META):
         return (
@@ -147,7 +151,7 @@ def gemm_one_shot_all_reduce(
     gemm_one_shot_all_reduce_kernel[grid](
         a,
         b,
-        symm_mem_hdl.buffer_ptrs_dev,
+        buf_tuple,
         symm_mem_hdl.signal_pad_ptrs_dev,
         output,
         M,
