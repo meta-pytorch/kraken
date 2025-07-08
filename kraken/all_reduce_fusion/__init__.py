@@ -1,4 +1,7 @@
 from .rms_norm import rms_norm
+from .triton_gemm_one_shot_all_reduce_fused import (
+    gemm_one_shot_all_reduce as triton_gemm_one_shot_all_reduce_fused,
+)
 from .triton_one_shot_all_reduce_bias import triton_one_shot_all_reduce_bias
 from .triton_one_shot_all_reduce_bias_rms_norm import (
     triton_one_shot_all_reduce_bias_rms_norm,
@@ -10,6 +13,7 @@ from .triton_two_shot_all_reduce_bias_rms_norm import (
 
 __all__ = [
     "rms_norm",
+    "triton_gemm_one_shot_all_reduce_fused",
     "triton_one_shot_all_reduce_bias",
     "triton_one_shot_all_reduce_bias_rms_norm",
     "triton_two_shot_all_reduce_bias",
