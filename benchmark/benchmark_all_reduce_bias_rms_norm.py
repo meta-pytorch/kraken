@@ -12,38 +12,38 @@ from kraken.all_reduce_fusion import (
     rms_norm,
 )
 from kraken.all_reduce_fusion import (
-    triton_one_shot_all_reduce_bias as one_shot_all_reduce_bias,
+    one_shot_all_reduce_bias as one_shot_all_reduce_bias,
 )
 from kraken.all_reduce_fusion import (
-    triton_one_shot_all_reduce_bias_rms_norm as one_shot_all_reduce_bias_rms_norm,
+    one_shot_all_reduce_bias_rms_norm as one_shot_all_reduce_bias_rms_norm,
 )
 from kraken.all_reduce_fusion import (
-    triton_two_shot_all_reduce_bias as two_shot_all_reduce_bias,
+    two_shot_all_reduce_bias as two_shot_all_reduce_bias,
 )
 from kraken.all_reduce_fusion import (
-    triton_two_shot_all_reduce_bias_rms_norm as two_shot_all_reduce_bias_rms_norm,
+    two_shot_all_reduce_bias_rms_norm as two_shot_all_reduce_bias_rms_norm,
 )
 
 
-def triton_one_shot_all_reduce_bias_rms_norm(x, bias, rms_weight, symm_mem_input):
+def one_shot_all_reduce_bias_rms_norm(x, bias, rms_weight, symm_mem_input):
     y = torch.empty_like(x)
     one_shot_all_reduce_bias_rms_norm(symm_mem_input, x, bias, rms_weight, y)
     return y
 
 
-def triton_one_shot_all_reduce_bias_with_rms_norm(x, bias, rms_weight, symm_mem_input):
+def one_shot_all_reduce_bias_with_rms_norm(x, bias, rms_weight, symm_mem_input):
     y = torch.empty_like(x)
     one_shot_all_reduce_bias(symm_mem_input, x, bias, y)
     return rms_norm(y, rms_weight)
 
 
-def triton_two_shot_all_reduce_bias_rms_norm(x, bias, rms_weight, symm_mem_input):
+def two_shot_all_reduce_bias_rms_norm(x, bias, rms_weight, symm_mem_input):
     y = torch.empty_like(x)
     two_shot_all_reduce_bias_rms_norm(symm_mem_input, x, bias, rms_weight, y)
     return y
 
 
-def triton_two_shot_all_reduce_bias_with_rms_norm(x, bias, rms_weight, symm_mem_input):
+def two_shot_all_reduce_bias_with_rms_norm(x, bias, rms_weight, symm_mem_input):
     y = torch.empty_like(x)
     two_shot_all_reduce_bias(symm_mem_input, x, bias, y)
     return rms_norm(y, rms_weight)
@@ -65,10 +65,10 @@ def create_benchmarks(b, t, d_size, device, dtype):
 
     all_functions = {
         "nccl_ring": nccl_all_reduce_bias_rms_norm,
-        "triton_one_shot_bias_fused + rms_norm": triton_one_shot_all_reduce_bias_with_rms_norm,
-        "triton_two_shot_bias_fused + rms_norm": triton_two_shot_all_reduce_bias_with_rms_norm,
-        "triton_one_shot_bias_rms_norm_fused": triton_one_shot_all_reduce_bias_rms_norm,
-        "triton_two_shot_bias_rms_norm_fused": triton_two_shot_all_reduce_bias_rms_norm,
+        "one_shot_bias_fused + rms_norm": one_shot_all_reduce_bias_with_rms_norm,
+        "two_shot_bias_fused + rms_norm": two_shot_all_reduce_bias_with_rms_norm,
+        "one_shot_bias_rms_norm_fused": one_shot_all_reduce_bias_rms_norm,
+        "two_shot_bias_rms_norm_fused": two_shot_all_reduce_bias_rms_norm,
     }
     all_benchmarks = {}
     for k, v in all_functions.items():

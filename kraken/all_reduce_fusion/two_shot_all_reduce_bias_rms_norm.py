@@ -129,7 +129,7 @@ def two_shot_all_reduce_bias_rms_norm_kernel(
     )
 
 
-def triton_two_shot_all_reduce_bias_rms_norm(
+def two_shot_all_reduce_bias_rms_norm(
     symm_mem_input: torch.Tensor,
     x: torch.Tensor,
     bias: torch.Tensor,

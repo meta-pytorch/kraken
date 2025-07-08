@@ -46,7 +46,7 @@ class TritonAllReduceTest(MultiProcessTestCase):
         torch.manual_seed(42 + self.rank)
 
     @skip_if_lt_x_gpu(4)
-    def test_triton_one_shot(self):
+    def test_one_shot(self):
         self._init_process()
         group_name = dist.group.WORLD.group_name
         input_tensor = symm_mem.empty(
@@ -57,7 +57,7 @@ class TritonAllReduceTest(MultiProcessTestCase):
         input_tensor = input_tensor.normal_()
         symm_mem.rendezvous(input_tensor, group_name)
 
-        result = kraken.all_reduce.triton_one_shot_all_reduce(input_tensor)
+        result = kraken.all_reduce.one_shot_all_reduce(input_tensor)
 
         golden = input_tensor.clone()
         dist.all_reduce(golden)

@@ -46,7 +46,7 @@ class TritonAllGatherMatmulTest(MultiProcessTestCase):
         torch.manual_seed(42 + self.rank)
 
     @skip_if_lt_x_gpu(4)
-    def test_triton_all_gather_matmul(self):
+    def test_all_gather_matmul(self):
         self._init_process()
         M = 4096
         N = 6656
@@ -64,7 +64,7 @@ class TritonAllGatherMatmulTest(MultiProcessTestCase):
         ).T.contiguous()
         b = bT.T
 
-        ag, c = kraken.all_gather.triton_all_gather_matmul(a_shared, b)
+        ag, c = kraken.all_gather.all_gather_matmul(a_shared, b)
 
         golden_a = a_shared.clone()
         ag_golden, mm_golden = torch.ops.symm_mem.fused_all_gather_matmul(

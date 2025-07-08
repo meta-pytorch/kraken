@@ -114,7 +114,7 @@ def get_single_backend_fn(backend: str):
     if backend == "dist_2shot":
         return symm_mem_two_shot_all_reduce
     if backend == "triton_1shot":
-        return kraken.all_reduce.triton_one_shot_all_reduce
+        return kraken.all_reduce.one_shot_all_reduce
     if backend == "nccl":
         return nccl_ring
     raise NotImplementedError(backend)
@@ -232,12 +232,12 @@ benchmark/benchmark_all_reduce.py
         nargs="+",
         choices=[
             "nccl",
-            "triton_1shot",
+            "1shot",
             "dist_multimem",
             "dist_1shot",
             "dist_2shot",
         ],
-        default=["nccl", "triton_1shot", "dist_multimem"],
+        default=["nccl", "1shot", "dist_multimem"],
         help="Backend to use for AllReduce. Use first backend as baseline. ",
     )
 
