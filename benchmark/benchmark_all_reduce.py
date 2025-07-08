@@ -232,12 +232,12 @@ benchmark/benchmark_all_reduce.py
         nargs="+",
         choices=[
             "nccl",
-            "1shot",
+            "triton_1shot",
             "dist_multimem",
             "dist_1shot",
             "dist_2shot",
         ],
-        default=["nccl", "1shot", "dist_multimem"],
+        default=["nccl", "triton_1shot", "dist_multimem"],
         help="Backend to use for AllReduce. Use first backend as baseline. ",
     )
 
