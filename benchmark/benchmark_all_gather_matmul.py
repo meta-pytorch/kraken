@@ -93,7 +93,7 @@ def get_single_backend_fn(backend: str):
     if backend == "torch_symm_mem":
         return torch_symm_mem_ag_mm
     if backend == "triton":
-        return kraken.all_gather.triton_all_gather_matmul
+        return kraken.all_gather.all_gather_matmul
     raise NotImplementedError(backend)
 
 

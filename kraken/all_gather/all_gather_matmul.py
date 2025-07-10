@@ -230,7 +230,7 @@ def _matmul_w_progress(
     return c
 
 
-def triton_all_gather_matmul(
+def all_gather_matmul(
     a_shared: torch.Tensor,
     b: torch.Tensor,
     a_out: torch.Tensor | None = None,
