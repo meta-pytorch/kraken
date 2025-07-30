@@ -93,7 +93,7 @@ def get_single_backend_fn(backend: str):
     if backend == "torch_symm_mem":
         return torch_symm_mem_gemm_rs
     if backend == "triton":
-        return kraken.reduce_scatter_fusion.gemm_reduce_scatter_fused
+        return kraken.reduce_scatter_fusion.gemm_reduce_scatter
     raise NotImplementedError(backend)
 
 
@@ -126,10 +126,11 @@ def run_experiment(config: ExperimentConfig) -> dict[str, float]:
     results = {}
     for backend in config.backends:
         fn = get_single_backend_fn(backend)
+        print(f"Function type: {type(fn)}, Function name: {fn.__name__}")
         inp = input_tensors[backend]
 
         test_o = fn(inp, b)
-        # torch.testing.assert_close(test_o[1], gloden_o[1], atol=1e-1, rtol=1e-1)
+        torch.testing.assert_close(test_o[1], gloden_o[1], atol=1e-1, rtol=1e-1)
 
         target_fn = functools.partial(fn, inp, b)
         results[backend] = benchmark_with_event(target_fn, flush_l2=True)
@@ -251,7 +252,7 @@ benchmark/benchmark_matmul_reduce_scatter.py
         help="matmul shapes: (M, N, K). (M, K) @ (K, N) -> (M, N)",
     )
 
-    parser.add_argument("-dtype", type=str, help="dtype", default="bfloat16")
+    parser.add_argument("-dtype", type=str, help="dtype", default="float32")
     parser.add_argument(
         "--save-path",
         type=str,
