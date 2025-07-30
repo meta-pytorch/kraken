@@ -1,16 +1,16 @@
 import argparse
-from collections import defaultdict
 import csv
-from dataclasses import asdict, dataclass
 import functools
 import itertools
 import os
 import sys
+from collections import defaultdict
+from dataclasses import asdict, dataclass
 
-from tabulate import tabulate
 import torch
 import torch.distributed as dist
 import torch.distributed._symmetric_memory as symm_mem
+from tabulate import tabulate
 
 # Add the kraken directory to the Python path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -20,15 +20,18 @@ from kraken._logging import benchmark_with_event
 
 
 def torch_symm_mem_gemm_rs(a, b):
-    torch.ops.symm_mem.fused_matmul_reduce_scatter(
+    gemm_rs_output = torch.ops.symm_mem.fused_matmul_reduce_scatter(
         a, b, "sum", scatter_dim=0, group_name=dist.group.WORLD.group_name
     )
+    return gemm_rs_output
 
 def nccl_mem_gemm_rs(a, b):
-    from torch.distributed._functional_collectives import reduce_scatter_tensor
+    from torch.distributed._functional_collectives import reduce_scatter_tensor, wait_tensor
 
     gemm_output = torch.matmul(a, b)
-    reduce_scatter_tensor(gemm_output, "sum", scatter_dim=0, group=dist.group.WORLD)
+    rs_o = reduce_scatter_tensor(gemm_output, "sum", scatter_dim=0, group=dist.group.WORLD)
+    gemm_rs_output = wait_tensor(rs_o)
+    return gemm_rs_output
 
 
 @dataclass(frozen=True)
@@ -119,12 +122,15 @@ def run_experiment(config: ExperimentConfig) -> dict[str, float]:
     input_tensors = {backend: clone_symm_mem_tensor(a) for backend in config.backends}
     gloden_inp = clone_symm_mem_tensor(a)
 
-    _ = get_single_backend_fn(config.baseline_backend)(gloden_inp, b)
+    gloden_o = get_single_backend_fn(config.baseline_backend)(gloden_inp, b)
 
     results = {}
     for backend in config.backends:
         fn = get_single_backend_fn(backend)
         inp = input_tensors[backend]
+
+        test_o = fn(inp, b)
+        torch.testing.assert_close(test_o[0], gloden_o[0], atol=9e-1, rtol=9e-1)
 
         target_fn = functools.partial(fn, inp, b)
         results[backend] = benchmark_with_event(target_fn, flush_l2=True)
@@ -198,7 +204,7 @@ if __name__ == "__main__":
     help_str = """
 Run with torchrun
 torchrun \
---nnodes 1 --nproc-per-node 8 \
+--nnodes 1 --nproc-per-node 1 \
 --rdzv-backend c10d --rdzv-endpoint localhost:0 \
 --no_python python3 \
 benchmark/benchmark_matmul_reduce_scatter.py
@@ -242,7 +248,7 @@ benchmark/benchmark_matmul_reduce_scatter.py
         "-K",
         type=shape_input_type,
         nargs="+",
-        default=[2**x for x in range(12, 15)],
+        default=[2**x for x in range(12, 16)],
         help="matmul shapes: (M, N, K). (M, K) @ (K, N) -> (M, N)",
     )
 
