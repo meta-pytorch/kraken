@@ -3,3 +3,4 @@
 triton >= 3.3.0
 torch >= 2.6.0; python_version >= "3.10"
 tyro
+cuda-bindings
