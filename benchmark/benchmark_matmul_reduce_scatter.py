@@ -94,7 +94,7 @@ def get_single_backend_fn(backend: str):
     if backend == "torch_symm_mem":
         return torch_symm_mem_gemm_rs
     if backend == "triton":
-        return kraken.reduce_scatter_fusion.gemm_reduce_scatter_ce_persistent
+        return kraken.reduce_scatter_fusion.triton_fused_matmul_reduce_scatter
     raise NotImplementedError(backend)
 
 
