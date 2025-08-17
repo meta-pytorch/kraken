@@ -3,7 +3,7 @@ import torch.distributed as dist
 import torch.distributed._symmetric_memory as symm_mem
 import triton
 import triton.language as tl
-import triton.tools.experimental_descriptor
+# import triton.tools.experimental_descriptor
 
 from .._ptx_utils import wait_gmem_barrier
 from .copy_engine_all_gather import copy_engine_all_gather_w_progress

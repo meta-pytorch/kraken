@@ -1,12 +1,14 @@
 import torch
 import torch.distributed as dist
 import torch.distributed._symmetric_memory as symm_mem
+import torch.distributed._symmetric_memory._nvshmem_triton as nvshmem
 
 import triton
 import triton.language as tl
 from cuda.bindings import driver
 
 from .._ptx_utils import get_flat_tid, send_signal
+
 
 
 def _matmul_launch_metadata(grid, kernel, args):
@@ -105,17 +107,13 @@ def _gemm_producer_persistent_kernel(
 
         offs_k = ki * BLOCK_SIZE_K
 
-        a = tl._experimental_descriptor_load(
-            a_desc_ptr, [offs_am, offs_k], [BLOCK_SIZE_M, BLOCK_SIZE_K], dtype
-        )
-        b = tl._experimental_descriptor_load(
-            b_desc_ptr, [offs_bn, offs_k], [BLOCK_SIZE_N, BLOCK_SIZE_K], dtype
-        )
+        a = a_desc_ptr.load([offs_am, offs_k])
+        b = b_desc_ptr.load([offs_bn, offs_k])
         accumulator = tl.dot(a, b.T, accumulator)
 
         if ki == k_tiles - 1:
             c = accumulator.to(dtype)
-            tl._experimental_descriptor_store(c_desc_ptr, c, [offs_am, offs_bn])
+            c_desc_ptr.store([offs_am, offs_bn], c)
 
             # calculate progress and send signals to corresponding ranks
             scatter_start = offs_am // M_per_rank
@@ -194,29 +192,16 @@ def gemm_producer_w_progress(
 
     bT = b.T
 
-    desc_a = _create_2d_tma_descriptor(
-        a.data_ptr(),
-        M,
-        K,
-        configs["BLOCK_SIZE_M"],
-        configs["BLOCK_SIZE_K"],
-        a.element_size(),
+    desc_a = triton.tools.tensor_descriptor.TensorDescriptor.from_tensor(
+        a, [configs["BLOCK_SIZE_M"], configs["BLOCK_SIZE_K"]]
     )
-    desc_bt = _create_2d_tma_descriptor(
-        bT.data_ptr(),
-        N,
-        K,
-        configs["BLOCK_SIZE_N"],
-        configs["BLOCK_SIZE_K"],
-        bT.element_size(),
+    desc_bt = triton.tools.tensor_descriptor.TensorDescriptor.from_tensor(
+        bT,
+        [configs["BLOCK_SIZE_N"], configs["BLOCK_SIZE_K"]],
     )
-    desc_c = _create_2d_tma_descriptor(
-        gemm_out.data_ptr(),
-        M,
-        N,
-        configs["BLOCK_SIZE_M"],
-        configs["BLOCK_SIZE_N"],
-        gemm_out.element_size(),
+    desc_c = triton.tools.tensor_descriptor.TensorDescriptor.from_tensor(
+        gemm_out,
+        [configs["BLOCK_SIZE_M"], configs["BLOCK_SIZE_N"]],
     )
 
     configs["NUM_SMS"] = torch.cuda.get_device_properties(
@@ -274,31 +259,20 @@ def _reduce_persistent_kernel(
         tile_id_m = tile_id // num_tiles_n
         tile_id_n = tile_id % num_tiles_n
         cur_rank = (RANK + 1) % WORLD_SIZE
-        accum = tl._experimental_descriptor_load(
-            in_desc_ptr,
-            [
-                tile_id_m * BLOCK_SIZE_M + cur_rank * M_per_rank,
-                tile_id_n * BLOCK_SIZE_N,
-            ],
-            [BLOCK_SIZE_M, BLOCK_SIZE_N],
-            tl.bfloat16,
+        accum = in_desc_ptr.load(
+            [tile_id_m * BLOCK_SIZE_M + cur_rank * M_per_rank, tile_id_n * BLOCK_SIZE_N]
         )
         for i in range(1, WORLD_SIZE):
             cur_rank = (i + RANK + 1) % WORLD_SIZE
-            data = tl._experimental_descriptor_load(
-                in_desc_ptr,
+            data = in_desc_ptr.load(
                 [
                     tile_id_m * BLOCK_SIZE_M + cur_rank * M_per_rank,
                     tile_id_n * BLOCK_SIZE_N,
-                ],
-                [BLOCK_SIZE_M, BLOCK_SIZE_N],
-                tl.bfloat16,
+                ]
             )
             accum += data
 
-        tl._experimental_descriptor_store(
-            out_desc_ptr, accum, [tile_id_m * BLOCK_SIZE_M, tile_id_n * BLOCK_SIZE_N]
-        )
+        out_desc_ptr.store([tile_id_m * BLOCK_SIZE_M, tile_id_n * BLOCK_SIZE_N], accum)
 
 
 def reduce(
@@ -312,22 +286,11 @@ def reduce(
 
     BLOCK_SIZE_M = 256
     BLOCK_SIZE_N = 64
-
-    in_desc_ptr = _create_2d_tma_descriptor(
-        inp.data_ptr(),
-        M,
-        N,
-        BLOCK_SIZE_M,
-        BLOCK_SIZE_N,
-        inp.element_size(),
+    in_desc_ptr = triton.tools.tensor_descriptor.TensorDescriptor.from_tensor(
+        inp, [BLOCK_SIZE_M, BLOCK_SIZE_N]
     )
-    out_desc_ptr = _create_2d_tma_descriptor(
-        output.data_ptr(),
-        M_per_rank,
-        N,
-        BLOCK_SIZE_M,
-        BLOCK_SIZE_N,
-        output.element_size(),
+    out_desc_ptr = triton.tools.tensor_descriptor.TensorDescriptor.from_tensor(
+        output, [BLOCK_SIZE_M, BLOCK_SIZE_N]
     )
 
     grid = lambda META: (  # noqa: E731
@@ -358,6 +321,12 @@ def gemm_reduce_scatter_ce_persistent(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     M = a.shape[0]
     N = b.shape[1]
+
+
+    # 1. Initialize NVSHMEM device library
+    # nvshmem_lib = nvshmem.enable_triton()
+
+
 
     group = dist.group.WORLD if group is None else group
     gemm_out = torch.empty((M, N), dtype=a.dtype, device=a.device)
