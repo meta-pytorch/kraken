@@ -2,8 +2,17 @@ import torch
 import torch.distributed as dist
 import torch.distributed._symmetric_memory as symm_mem
 
+# 
+import torch.distributed._symmetric_memory._nvshmem_triton as nvshmem
+
 import triton  # @manual
 import triton.language as tl  # @manual
+
+
+def check_if_nvshmem_available():
+    return torch.cuda.is_available() and torch.cuda.get_device_properties(
+        torch.cuda.current_device()
+    ).major >= 8 and symm_mem.is_nvshmem_available()
 
 
 def _matmul_launch_metadata(grid, kernel, args):
@@ -23,6 +32,9 @@ def _matmul_launch_metadata(grid, kernel, args):
 def _gemm_producer_persistent_kernel(
     a_desc_ptr,
     b_desc_ptr,
+    c_desc_ptr,
+    gemm_out,
+    progress_ptr,
     symm_mem_ptrs_ptr,
     M,
     N,
@@ -86,31 +98,58 @@ def _gemm_producer_persistent_kernel(
 
         if ki == k_tiles - 1:
             c = accumulator.to(dtype)
+            c_desc_ptr.store([offs_am, offs_bn], c)
 
-            remote_rank = offs_am // M_per_rank
-            remote_buffer_ptr_int64 = tl.load(symm_mem_ptrs_ptr + remote_rank)
-            remote_buffer_ptr = remote_buffer_ptr_int64.to(tl.pointer_type(dtype))
-            block_ptr = tl.make_block_ptr(
-                base=remote_buffer_ptr,  # int64 base address
-                shape=(M, N),  # full matrix shape
-                strides=(N, 1),  # row-major
-                offsets=(
-                    M_per_rank * RANK - M_per_rank * remote_rank + offs_am,
-                    offs_bn,
-                ),  # tile start
-                block_shape=(BLOCK_SIZE_M, BLOCK_SIZE_N),  # tile size
-                order=(1, 0),  # row-major
-            )
-            tl.store(block_ptr, c)
+            # calculate progress and send signals to corresponding ranks
+            scatter_start = offs_am // M_per_rank
+            scatter_end = (offs_am + BLOCK_SIZE_M - 1) // M_per_rank
+            scatter_end = min(scatter_end, WORLD_SIZE - 1)
+
+            for remote_rank in range(scatter_start, scatter_end + 1):
+                m_start = M_per_rank * remote_rank
+                m_end = M_per_rank * (remote_rank + 1) - 1
+                tiled_m_start = m_start // BLOCK_SIZE_M
+                tiled_m_end = m_end // BLOCK_SIZE_M
+                tiled_m_size = tiled_m_end - tiled_m_start + 1
+                val = tl.atomic_add(
+                    progress_ptr + remote_rank, 1, sem="release", scope="gpu"
+                )
+                if val == tiled_m_size * num_pid_n - 1:
+                    remote_buffer_ptr_int64 = tl.load(symm_mem_ptrs_ptr + remote_rank)
+                    dest_ptr = remote_buffer_ptr_int64 + RANK * M_per_rank * N * gemm_out.type.element_ty.itemsize
+                    source_ptr = gemm_out.to(tl.int64) + remote_rank * M_per_rank * N * gemm_out.type.element_ty.itemsize
+                    nvshmem.putmem_block_extern_wrapper(
+                        dest_ptr, source_ptr, M_per_rank * N * gemm_out.type.element_ty.itemsize, remote_rank
+                    )
             accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+
+            # remote_rank = offs_am // M_per_rank
+            # remote_buffer_ptr_int64 = tl.load(symm_mem_ptrs_ptr + remote_rank)
+            # remote_buffer_ptr = remote_buffer_ptr_int64.to(tl.pointer_type(dtype))
+            # block_ptr = tl.make_block_ptr(
+            #     base=remote_buffer_ptr,  # int64 base address
+            #     shape=(M, N),  # full matrix shape
+            #     strides=(N, 1),  # row-major
+            #     offsets=(
+            #         M_per_rank * RANK - M_per_rank * remote_rank + offs_am,
+            #         offs_bn,
+            #     ),  # tile start
+            #     block_shape=(BLOCK_SIZE_M, BLOCK_SIZE_N),  # tile size
+            #     order=(1, 0),  # row-major
+            # )
+            # tl.store(block_ptr, c)
+            # accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
 
 
 def gemm_producer_w_progress(
     a: torch.Tensor,
     b: torch.Tensor,
-    symm_mem_ptrs_ptr,
+    gemm_out: torch.Tensor,
+    progress: torch.Tensor,
+    symm_mem_ptr_tensor,
     configs: dict,
     group: dist.ProcessGroup | None = None,
+    extern_libs: object | None = None,
 ):
     M, K = a.shape
     Kb, N = b.shape
@@ -125,6 +164,10 @@ def gemm_producer_w_progress(
     desc_bt = triton.tools.tensor_descriptor.TensorDescriptor.from_tensor(
         bT,
         [configs["BLOCK_SIZE_N"], configs["BLOCK_SIZE_K"]],
+    )
+    desc_c = triton.tools.tensor_descriptor.TensorDescriptor.from_tensor(
+        gemm_out,
+        [configs["BLOCK_SIZE_M"], configs["BLOCK_SIZE_N"]],
     )
 
     configs["NUM_SMS"] = torch.cuda.get_device_properties(
@@ -143,7 +186,10 @@ def gemm_producer_w_progress(
     _gemm_producer_persistent_kernel[grid](
         desc_a,
         desc_bt,
-        symm_mem_ptrs_ptr,
+        desc_c,
+        gemm_out,
+        progress,
+        symm_mem_ptr_tensor,
         M,
         N,
         K,
@@ -157,6 +203,7 @@ def gemm_producer_w_progress(
         NUM_SMS=configs["NUM_SMS"],
         num_stages=configs["num_stages"],
         num_warps=configs["num_warps"],
+        extern_libs=extern_libs, # nvshmem
     )
 
 
@@ -255,6 +302,10 @@ def triton_fused_matmul_reduce_scatter(
 
     M, N = a.shape[0], b.shape[1]
 
+    # Initialize NVSHMEM device library
+    nvshmem_lib = nvshmem.enable_triton()
+    assert (symm_mem.is_nvshmem_available()), "NVSHMEM is not available"
+
     # Use the global process group if no specific group is provided, otherwise use the given group
     group = dist.group.WORLD if group is None else group
     # Get the total number of processes/GPUs in the distributed group
@@ -307,7 +358,23 @@ def triton_fused_matmul_reduce_scatter(
         )
     symm_mem_ptr = torch.tensor(symm_mem_ptrs, dtype=torch.int64, device=a.device)
 
-    gemm_producer_w_progress(a, b, symm_mem_ptr, configs)
+    # group_name = dist.group.WORLD.group_name
+    # symm_mem.enable_symm_mem_for_group(group_name)
+    # symm_mem_tensor = symm_mem.empty(M * N, dtype=a.dtype, device=a.device)
+    # symm_mem_hdl = symm_mem.rendezvous(symm_mem_tensor, group=group_name)
+    # for rank in range(world_size):
+    #     if rank == symm_mem_hdl.rank:
+    #         scatter_out = symm_mem_hdl.buffer_ptrs[rank]
+    #         symm_mem_ptrs.append(scatter_out)
+    #         continue
+    #     symm_mem_ptrs.append(symm_mem_hdl.buffer_ptrs[rank])
+    # symm_mem_ptr_tensor = torch.tensor(symm_mem_ptrs, dtype=torch.int64, device=a.device)
+
+
+    gemm_out = torch.empty((M, N), dtype=a.dtype, device=a.device)
+    progress = torch.zeros(world_size, dtype=torch.uint32, device=a.device)
+
+    gemm_producer_w_progress(a, b, gemm_out, progress, symm_mem_ptr, configs, extern_libs=nvshmem_lib)
     symm_mem_hdl.barrier()
 
     # Communication is now fused into the GEMM kernel, no separate copy engine needed
