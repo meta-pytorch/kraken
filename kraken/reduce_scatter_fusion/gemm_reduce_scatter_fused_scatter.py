@@ -33,9 +33,10 @@ def _gemm_producer_persistent_kernel(
     a_desc_ptr,
     b_desc_ptr,
     c_desc_ptr,
-    gemm_out,
+    gemm_out_data_ptr,
     progress_ptr,
     symm_mem_ptrs_ptr,
+    signal_pad_ptr_tensor,
     M,
     N,
     K,
@@ -100,27 +101,27 @@ def _gemm_producer_persistent_kernel(
             c = accumulator.to(dtype)
             c_desc_ptr.store([offs_am, offs_bn], c)
 
-            # calculate progress and send signals to corresponding ranks
-            scatter_start = offs_am // M_per_rank
-            scatter_end = (offs_am + BLOCK_SIZE_M - 1) // M_per_rank
-            scatter_end = min(scatter_end, WORLD_SIZE - 1)
+            remote_rank = offs_am // M_per_rank
+            val = tl.atomic_add(
+                progress_ptr + remote_rank, 1, sem="release", scope="gpu"
+            )
+            # tiled_m_size * num_pid_n  = num of tiles in a slice
 
-            for remote_rank in range(scatter_start, scatter_end + 1):
-                m_start = M_per_rank * remote_rank
-                m_end = M_per_rank * (remote_rank + 1) - 1
-                tiled_m_start = m_start // BLOCK_SIZE_M
-                tiled_m_end = m_end // BLOCK_SIZE_M
-                tiled_m_size = tiled_m_end - tiled_m_start + 1
-                val = tl.atomic_add(
-                    progress_ptr + remote_rank, 1, sem="release", scope="gpu"
-                )
-                if val == tiled_m_size * num_pid_n - 1:
-                    remote_buffer_ptr_int64 = tl.load(symm_mem_ptrs_ptr + remote_rank)
-                    dest_ptr = remote_buffer_ptr_int64 + RANK * M_per_rank * N * gemm_out.type.element_ty.itemsize
-                    source_ptr = gemm_out.to(tl.int64) + remote_rank * M_per_rank * N * gemm_out.type.element_ty.itemsize
-                    nvshmem.putmem_block_extern_wrapper(
-                        dest_ptr, source_ptr, M_per_rank * N * gemm_out.type.element_ty.itemsize, remote_rank
-                    )
+            if val == M_per_rank / BLOCK_SIZE_M * num_pid_n - 1:
+                remote_buffer_ptr_int64 = tl.load(symm_mem_ptrs_ptr + remote_rank)
+                remote_signal_pad_ptr_int64 = tl.load(signal_pad_ptr_tensor + remote_rank)
+                # tl.device_print("remote_buffer_ptr_int64: ", remote_buffer_ptr_int64)
+                # dest_ptr = remote_buffer_ptr_int64 + RANK * M_per_rank * N * dtype.itemsize
+                dest_ptr = remote_buffer_ptr_int64
+                # source_ptr = gemm_out.to(tl.int64) + remote_rank * M_per_rank * N * dtype.itemsize
+                source_ptr = gemm_out_data_ptr
+                tl.device_print("BEFORE NVSHMEM!!!", val)
+                tl.device_print("From rank ", RANK)
+                tl.device_print("To rank ", remote_rank)
+                NVSHMEM_SIGNAL_SET = 0
+                nvshmem.putmem_signal_block(
+                    dest_ptr, source_ptr, 8, remote_signal_pad_ptr_int64, 1, NVSHMEM_SIGNAL_SET, remote_rank)
+                tl.device_print("AFTER NVSHMEM!!!")
             accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
 
             # remote_rank = offs_am // M_per_rank
@@ -147,6 +148,7 @@ def gemm_producer_w_progress(
     gemm_out: torch.Tensor,
     progress: torch.Tensor,
     symm_mem_ptr_tensor,
+    signal_pad_ptr_tensor,
     configs: dict,
     group: dist.ProcessGroup | None = None,
     extern_libs: object | None = None,
@@ -187,9 +189,10 @@ def gemm_producer_w_progress(
         desc_a,
         desc_bt,
         desc_c,
-        gemm_out,
+        gemm_out.data_ptr(),
         progress,
         symm_mem_ptr_tensor,
+        signal_pad_ptr_tensor,
         M,
         N,
         K,
@@ -317,11 +320,6 @@ def triton_fused_matmul_reduce_scatter(
         M % world_size == 0
     ), f"M dimension ({M}) must be divisible by world_size ({world_size})"
 
-    # Create symmetric buffer for GEMM output
-    symm_mem_hdl = symm_mem.get_symm_mem_workspace(
-        group.group_name, min_size=M * N * a.element_size()
-    )
-
     # Ensure the matrix can be evenly divided among all processes
     assert M % world_size == 0
 
@@ -345,36 +343,43 @@ def triton_fused_matmul_reduce_scatter(
         (M / world_size) % configs["BLOCK_SIZE_M"] == 0
     ), f"M_per_rank dimension ({M / world_size}) must be divisible by BLOCK_SIZE_M ({configs["BLOCK_SIZE_M"]})"
 
-    # Create an array of raw data pointers to the symmetric memory buffers on each rank
-    symm_mem_ptrs = []
+    # # Create symmetric buffer for GEMM output
+    # symm_mem_hdl = symm_mem.get_symm_mem_workspace(
+    #     group.group_name, min_size=M * N * a.element_size()
+    # )
+    # # Create an array of raw data pointers to the symmetric memory buffers on each rank
+    # symm_mem_ptrs = []
     scatter_out = None
-    for rank in range(world_size):
-        if rank == symm_mem_hdl.rank:
-            scatter_out = symm_mem_hdl.get_buffer(rank, [M, N], a.dtype, 0)
-            symm_mem_ptrs.append(scatter_out.data_ptr())
-            continue
-        symm_mem_ptrs.append(
-            symm_mem_hdl.get_buffer(rank, [M, N], a.dtype, 0).data_ptr()
-        )
-    symm_mem_ptr = torch.tensor(symm_mem_ptrs, dtype=torch.int64, device=a.device)
-
-    # group_name = dist.group.WORLD.group_name
-    # symm_mem.enable_symm_mem_for_group(group_name)
-    # symm_mem_tensor = symm_mem.empty(M * N, dtype=a.dtype, device=a.device)
-    # symm_mem_hdl = symm_mem.rendezvous(symm_mem_tensor, group=group_name)
     # for rank in range(world_size):
     #     if rank == symm_mem_hdl.rank:
-    #         scatter_out = symm_mem_hdl.buffer_ptrs[rank]
-    #         symm_mem_ptrs.append(scatter_out)
+    #         scatter_out = symm_mem_hdl.get_buffer(rank, [M, N], a.dtype, 0)
+    #         symm_mem_ptrs.append(scatter_out.data_ptr())
     #         continue
-    #     symm_mem_ptrs.append(symm_mem_hdl.buffer_ptrs[rank])
+    #     symm_mem_ptrs.append(
+    #         symm_mem_hdl.get_buffer(rank, [M, N], a.dtype, 0).data_ptr()
+    #     )
+    # symm_mem_ptr = torch.tensor(symm_mem_ptrs, dtype=torch.int64, device=a.device)
+
+    group_name = dist.group.WORLD.group_name
+    symm_mem.enable_symm_mem_for_group(group_name)
+    symm_mem_tensor = symm_mem.empty(M * N, dtype=a.dtype, device=a.device)
+    symm_mem_hdl = symm_mem.rendezvous(symm_mem_tensor, group=group_name)
+    symm_mem_ptr_tensor = torch.empty(world_size, dtype=torch.int64, device=a.device)
+    signal_pad_ptr_tensor = torch.empty(world_size, dtype=torch.int64, device=a.device)
+    for rank in range(world_size):
+        signal_pad_ptr_tensor[rank] = symm_mem_hdl.signal_pad_ptrs[rank]
+        if rank == symm_mem_hdl.rank:
+            scatter_out = symm_mem_hdl.buffer_ptrs[rank]
+            symm_mem_ptr_tensor[rank] = scatter_out
+            continue
+        symm_mem_ptr_tensor[rank] = symm_mem_hdl.buffer_ptrs[rank]
     # symm_mem_ptr_tensor = torch.tensor(symm_mem_ptrs, dtype=torch.int64, device=a.device)
 
 
-    gemm_out = torch.empty((M, N), dtype=a.dtype, device=a.device)
+    gemm_out = symm_mem.empty((M, N), dtype=a.dtype, device=a.device)
     progress = torch.zeros(world_size, dtype=torch.uint32, device=a.device)
 
-    gemm_producer_w_progress(a, b, gemm_out, progress, symm_mem_ptr, configs, extern_libs=nvshmem_lib)
+    gemm_producer_w_progress(a, b, gemm_out, progress, symm_mem_ptr_tensor, signal_pad_ptr_tensor, configs, extern_libs=nvshmem_lib)
     symm_mem_hdl.barrier()
 
     # Communication is now fused into the GEMM kernel, no separate copy engine needed
