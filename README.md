@@ -18,7 +18,7 @@ Kraken requires:
 
 ## Installation
 ```bash
-git clone https://github.com/pytorch-labs/kraken
+git clone https://github.com/meta-pytorch/kraken
 cd kraken
 pip install -e . -r requirements.txt
 ```
