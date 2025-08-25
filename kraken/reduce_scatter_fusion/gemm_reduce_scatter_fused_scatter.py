@@ -1,14 +1,9 @@
 import torch
 import torch.distributed as dist
 import torch.distributed._symmetric_memory as symm_mem
-import torch.distributed._symmetric_memory._nvshmem_triton as nvshmem
 
-import triton
-import triton.language as tl
-from cuda.bindings import driver
-
-from .._ptx_utils import get_flat_tid, send_signal
-
+import triton  # @manual
+import triton.language as tl  # @manual
 
 
 def _matmul_launch_metadata(grid, kernel, args):
@@ -24,33 +19,11 @@ def _matmul_launch_metadata(grid, kernel, args):
     return ret
 
 
-_tma_desc_cache = {}
-
-
-def _create_2d_tma_descriptor(ptr, dim1, dim0, block_dim1, block_dim0, element_size):
-    global _tma_desc_cache
-    key = (ptr, dim1, dim0, block_dim1, block_dim0, element_size)
-    if key in _tma_desc_cache:
-        return _tma_desc_cache[key]
-    desc = triton.tools.experimental_descriptor.create_2d_tma_descriptor(
-        ptr,
-        dim1,
-        dim0,
-        block_dim1,
-        block_dim0,
-        element_size,
-    )
-    _tma_desc_cache[key] = desc
-    return desc
-
-
 @triton.jit(launch_metadata=_matmul_launch_metadata)
 def _gemm_producer_persistent_kernel(
     a_desc_ptr,
     b_desc_ptr,
-    c_desc_ptr,
-    progress_ptr,
-    signal_pad_ptr,
+    symm_mem_ptrs_ptr,
     M,
     N,
     K,
@@ -113,75 +86,29 @@ def _gemm_producer_persistent_kernel(
 
         if ki == k_tiles - 1:
             c = accumulator.to(dtype)
-            c_desc_ptr.store([offs_am, offs_bn], c)
 
-            # calculate progress and send signals to corresponding ranks
-            scatter_start = offs_am // M_per_rank
-            scatter_end = (offs_am + BLOCK_SIZE_M - 1) // M_per_rank
-            scatter_end = min(scatter_end, WORLD_SIZE - 1)
-
-            for rank in range(scatter_start, scatter_end + 1):
-                m_start = M_per_rank * rank
-                m_end = M_per_rank * (rank + 1) - 1
-                tiled_m_start = m_start // BLOCK_SIZE_M
-                tiled_m_end = m_end // BLOCK_SIZE_M
-                tiled_m_size = tiled_m_end - tiled_m_start + 1
-                val = tl.atomic_add(progress_ptr + rank, 1, sem="release", scope="gpu")
-                if val == tiled_m_size * num_pid_n - 1:
-                    send_addr = signal_pad_ptr + rank
-                    if get_flat_tid() == 0:
-                        send_signal(send_addr, "release")
-
+            remote_rank = offs_am // M_per_rank
+            remote_buffer_ptr_int64 = tl.load(symm_mem_ptrs_ptr + remote_rank)
+            remote_buffer_ptr = remote_buffer_ptr_int64.to(tl.pointer_type(dtype))
+            block_ptr = tl.make_block_ptr(
+                base=remote_buffer_ptr,  # int64 base address
+                shape=(M, N),  # full matrix shape
+                strides=(N, 1),  # row-major
+                offsets=(
+                    M_per_rank * RANK - M_per_rank * remote_rank + offs_am,
+                    offs_bn,
+                ),  # tile start
+                block_shape=(BLOCK_SIZE_M, BLOCK_SIZE_N),  # tile size
+                order=(1, 0),  # row-major
+            )
+            tl.store(block_ptr, c)
             accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
-
-
-def copy_engine_scatter(
-    inp: torch.Tensor,
-    output: torch.Tensor,  # Must be symmetric tensor
-    signal_pad: torch.Tensor,
-    group: dist.ProcessGroup | None = None,
-):
-    assert output.is_contiguous()
-    M, N = inp.shape
-
-    symm_mem_hdl = symm_mem.get_symm_mem_workspace(
-        group.group_name, min_size=output.numel() * output.element_size()
-    )
-
-    rank = symm_mem_hdl.rank
-    world_size = symm_mem_hdl.world_size
-    M_per_rank = M // world_size
-
-    # copy gemm tiles to corresponding ranks
-    stream = torch.cuda.current_stream()
-    for step in range(world_size):
-        remote_rank = (rank + step + 1) % world_size
-
-        # wait signal from gemm kernel
-        signal_pad_ptr = signal_pad.data_ptr()
-        signal_ele_size = signal_pad.element_size()
-        wait_addr = signal_pad_ptr + signal_ele_size * remote_rank
-        driver.cuStreamWaitValue32(
-            stream.cuda_stream,
-            wait_addr,
-            1,
-            driver.CUstreamWaitValue_flags.CU_STREAM_WAIT_VALUE_EQ,
-        )
-
-        offset = rank * M_per_rank * N
-        remote_buf = symm_mem_hdl.get_buffer(
-            remote_rank, [M_per_rank, N], inp.dtype, offset
-        )
-        src_buf = inp[remote_rank * M_per_rank : (remote_rank + 1) * M_per_rank, :]
-        remote_buf.copy_(src_buf)
 
 
 def gemm_producer_w_progress(
     a: torch.Tensor,
     b: torch.Tensor,
-    gemm_out: torch.Tensor,
-    progress: torch.Tensor,
-    signal_pad: torch.Tensor,
+    symm_mem_ptrs_ptr,
     configs: dict,
     group: dist.ProcessGroup | None = None,
 ):
@@ -198,10 +125,6 @@ def gemm_producer_w_progress(
     desc_bt = triton.tools.tensor_descriptor.TensorDescriptor.from_tensor(
         bT,
         [configs["BLOCK_SIZE_N"], configs["BLOCK_SIZE_K"]],
-    )
-    desc_c = triton.tools.tensor_descriptor.TensorDescriptor.from_tensor(
-        gemm_out,
-        [configs["BLOCK_SIZE_M"], configs["BLOCK_SIZE_N"]],
     )
 
     configs["NUM_SMS"] = torch.cuda.get_device_properties(
@@ -220,9 +143,7 @@ def gemm_producer_w_progress(
     _gemm_producer_persistent_kernel[grid](
         desc_a,
         desc_bt,
-        desc_c,
-        progress,
-        signal_pad,
+        symm_mem_ptrs_ptr,
         M,
         N,
         K,
@@ -312,58 +233,84 @@ def reduce(
     return output
 
 
-def gemm_reduce_scatter_ce_persistent(
+def triton_fused_matmul_reduce_scatter(
     a: torch.Tensor,
     b: torch.Tensor,
-    reduce_op: str = "sum",  # only support sum for now
     group: dist.ProcessGroup | None = None,
     **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    M = a.shape[0]
-    N = b.shape[1]
+    """
+    Fused GEMM + Reduce-Scatter with overlapped GEMM and Scatter operation.
+    Computes C = A @ B on each rank, then performs reduce-scatter to sum results
+    and scatter them along the M dimension.
+    Args:
+        a: Input matrix A of shape (M, K)
+        b: Input matrix B of shape (K, N)
+    Returns:
+        Output matrix of shape (M / world_size, N) containing the reduce-scattered result.
+    """
+    assert (
+        a.shape[1] == b.shape[0]
+    ), "Inner dimensions must match for matrix multiplication"
 
+    M, N = a.shape[0], b.shape[1]
 
-    # 1. Initialize NVSHMEM device library
-    # nvshmem_lib = nvshmem.enable_triton()
-
-
-
+    # Use the global process group if no specific group is provided, otherwise use the given group
     group = dist.group.WORLD if group is None else group
-    gemm_out = torch.empty((M, N), dtype=a.dtype, device=a.device)
+    # Get the total number of processes/GPUs in the distributed group
+    world_size = dist.get_world_size(group)
+    # Get the current process's rank (ID) within the distributed group (0 to world_size-1)
+    rank = dist.get_rank(group)
+
+    assert (
+        M % world_size == 0
+    ), f"M dimension ({M}) must be divisible by world_size ({world_size})"
+
+    # Create symmetric buffer for GEMM output
     symm_mem_hdl = symm_mem.get_symm_mem_workspace(
         group.group_name, min_size=M * N * a.element_size()
     )
-    scatter_out = symm_mem_hdl.get_buffer(symm_mem_hdl.rank, [M, N], a.dtype, 0)
-    world_size = symm_mem_hdl.world_size
 
+    # Ensure the matrix can be evenly divided among all processes
     assert M % world_size == 0
-    M_per_rank = M // world_size
-    backend_stream = symm_mem._get_backend_stream(priority=-1)
-    backend_stream.wait_stream(torch.cuda.current_stream())
 
+    # Create output tensor for the scatter result
+    M_per_rank = M // world_size
     output = torch.empty((M_per_rank, N), dtype=a.dtype, device=a.device)
 
+    # configurations for GEMM heurisitcs etc
     configs = {
-        "BLOCK_SIZE_M": kwargs.get("block_size_m", 128),
+        "BLOCK_SIZE_M": kwargs.get("block_size_m", 64),
         "BLOCK_SIZE_N": kwargs.get("block_size_n", 256),
         "BLOCK_SIZE_K": kwargs.get("block_size_k", 64),
         "GROUP_SIZE_M": kwargs.get("group_size_m", 8),
         "num_stages": kwargs.get("num_stages", 3),
         "num_warps": kwargs.get("num_warps", 8),
     }
-    configs["RANK"] = symm_mem_hdl.rank
+    configs["RANK"] = rank
     configs["WORLD_SIZE"] = world_size
 
-    progress = torch.zeros(world_size, dtype=torch.uint32, device=a.device)
-    signal_pad = torch.zeros(world_size, dtype=torch.uint32, device=a.device)
+    assert (
+        (M / world_size) % configs["BLOCK_SIZE_M"] == 0
+    ), f"M_per_rank dimension ({M / world_size}) must be divisible by BLOCK_SIZE_M ({configs["BLOCK_SIZE_M"]})"
 
-    gemm_producer_w_progress(a, b, gemm_out, progress, signal_pad, configs)
+    # Create an array of raw data pointers to the symmetric memory buffers on each rank
+    symm_mem_ptrs = []
+    scatter_out = None
+    for rank in range(world_size):
+        if rank == symm_mem_hdl.rank:
+            scatter_out = symm_mem_hdl.get_buffer(rank, [M, N], a.dtype, 0)
+            symm_mem_ptrs.append(scatter_out.data_ptr())
+            continue
+        symm_mem_ptrs.append(
+            symm_mem_hdl.get_buffer(rank, [M, N], a.dtype, 0).data_ptr()
+        )
+    symm_mem_ptr = torch.tensor(symm_mem_ptrs, dtype=torch.int64, device=a.device)
 
-    with backend_stream:
-        copy_engine_scatter(gemm_out, scatter_out, signal_pad, group)
-
-    torch.cuda.current_stream().wait_stream(backend_stream)
+    gemm_producer_w_progress(a, b, symm_mem_ptr, configs)
     symm_mem_hdl.barrier()
+
+    # Communication is now fused into the GEMM kernel, no separate copy engine needed
 
     reduce(scatter_out, output, configs)
 
