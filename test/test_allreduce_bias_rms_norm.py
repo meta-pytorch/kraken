@@ -13,8 +13,8 @@ from torch.testing._internal.common_utils import (
 )
 
 from kraken.all_reduce_fusion import (
-    rms_norm,
     one_shot_all_reduce_bias_rms_norm,
+    rms_norm,
     two_shot_all_reduce_bias_rms_norm,
 )
 
@@ -74,9 +74,7 @@ class TritonAllReduceBiasRMSNormTest(MultiProcessTestCase):
             bias = torch.randn(b, 5120, device=self.device, dtype=torch.bfloat16)
             w = torch.randn(5120, device=self.device, dtype=torch.bfloat16)
             y = torch.empty_like(input_tensor)
-            one_shot_all_reduce_bias_rms_norm(
-                symm_mem_buffer, input_tensor, bias, w, y
-            )
+            one_shot_all_reduce_bias_rms_norm(symm_mem_buffer, input_tensor, bias, w, y)
             baseline = self._nccl_all_reduce_bias_rms_norm(
                 input_tensor.clone(), w.clone(), bias.clone()
             )
@@ -107,9 +105,7 @@ class TritonAllReduceBiasRMSNormTest(MultiProcessTestCase):
             bias = torch.randn(b, 5120, device=self.device, dtype=torch.bfloat16)
             w = torch.randn(5120, device=self.device, dtype=torch.bfloat16)
             y = torch.empty_like(input_tensor)
-            two_shot_all_reduce_bias_rms_norm(
-                symm_mem_buffer, input_tensor, bias, w, y
-            )
+            two_shot_all_reduce_bias_rms_norm(symm_mem_buffer, input_tensor, bias, w, y)
             baseline = self._nccl_all_reduce_bias_rms_norm(
                 input_tensor.clone(), w.clone(), bias.clone()
             )

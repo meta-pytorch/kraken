@@ -1,10 +1,9 @@
+from datetime import timedelta
 import os
 import sys
-from datetime import timedelta
 
 import torch
 import torch.distributed as dist
-import torch.distributed._symmetric_memory as symm_mem
 from torch.testing._internal.common_distributed import (
     MultiProcessTestCase,
     skip_if_lt_x_gpu,
@@ -98,7 +97,10 @@ class TritonGemmAllReduceTest(MultiProcessTestCase):
         # Each rank contributes (rank + 1) to the final sum
         # This makes it easy to verify all-reduce worked correctly
         rank_multiplier = self.rank + 1
-        a = torch.ones((M, K), dtype=torch.float32, device=self.device) * rank_multiplier
+        a = (
+            torch.ones((M, K), dtype=torch.float32, device=self.device)
+            * rank_multiplier
+        )
         b = torch.ones((K, N), dtype=torch.float32, device=self.device)
 
         result = kraken.all_reduce_fusion.gemm_one_shot_all_reduce_fused(a, b)
@@ -107,10 +109,13 @@ class TritonGemmAllReduceTest(MultiProcessTestCase):
         # rank 0: 1*K, rank 1: 2*K, rank 2: 3*K, rank 3: 4*K
         # Total = K * (1+2+3+4) = K * 10
         expected_sum = K * sum(range(1, self.world_size + 1))  # K * 10 = K * 10
-        expected = torch.full((M, N), expected_sum, dtype=torch.float32, device=self.device)
+        expected = torch.full(
+            (M, N), expected_sum, dtype=torch.float32, device=self.device
+        )
 
         torch.testing.assert_close(result, expected, rtol=1e-5, atol=1e-5)
         dist.destroy_process_group()
+
 
 if __name__ == "__main__":
     run_tests()

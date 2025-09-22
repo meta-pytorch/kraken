@@ -64,7 +64,7 @@ class TritonAllGatherMatmulTest(MultiProcessTestCase):
         ).T.contiguous()
         b = bT.T
 
-        ag, c = kraken.all_gather.all_gather_matmul(a_shared, b)
+        ag, c = kraken.all_gather_fusion.all_gather_matmul(a_shared, b)
 
         golden_a = a_shared.clone()
         ag_golden, mm_golden = torch.ops.symm_mem.fused_all_gather_matmul(

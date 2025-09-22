@@ -115,9 +115,9 @@ def gemm_one_shot_all_reduce(
         Output matrix of shape (M, N) containing the all-reduced result
     """
 
-    assert (
-        a.shape[1] == b.shape[0]
-    ), "Inner dimensions must match for matrix multiplication"
+    assert a.shape[1] == b.shape[0], (
+        "Inner dimensions must match for matrix multiplication"
+    )
 
     M, K = a.shape
     K, N = b.shape

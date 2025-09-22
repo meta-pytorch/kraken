@@ -1,16 +1,16 @@
 import argparse
+from collections import defaultdict
 import csv
+from dataclasses import asdict, dataclass
 import functools
 import itertools
 import os
 import sys
-from collections import defaultdict
-from dataclasses import asdict, dataclass
 
+from tabulate import tabulate
 import torch
 import torch.distributed as dist
 import torch.distributed._symmetric_memory as symm_mem
-from tabulate import tabulate
 
 # Add the kraken directory to the Python path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -20,18 +20,22 @@ from kraken._logging import benchmark_with_event
 
 
 def torch_symm_mem_gemm_rs(a, b):
-    gemm_rs_output = torch.ops.symm_mem.fused_matmul_reduce_scatter(
+    return torch.ops.symm_mem.fused_matmul_reduce_scatter(
         a, b, "sum", scatter_dim=0, group_name=dist.group.WORLD.group_name
     )
-    return gemm_rs_output
+
 
 def nccl_mem_gemm_rs(a, b):
-    from torch.distributed._functional_collectives import reduce_scatter_tensor, wait_tensor
+    from torch.distributed._functional_collectives import (
+        reduce_scatter_tensor,
+        wait_tensor,
+    )
 
     gemm_output = torch.matmul(a, b)
-    rs_o = reduce_scatter_tensor(gemm_output, "sum", scatter_dim=0, group=dist.group.WORLD)
-    gemm_rs_output = wait_tensor(rs_o)
-    return gemm_rs_output
+    rs_o = reduce_scatter_tensor(
+        gemm_output, "sum", scatter_dim=0, group=dist.group.WORLD
+    )
+    return wait_tensor(rs_o)
 
 
 @dataclass(frozen=True)

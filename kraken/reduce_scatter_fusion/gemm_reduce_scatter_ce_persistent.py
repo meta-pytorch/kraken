@@ -1,10 +1,9 @@
+from cuda.bindings import driver
 import torch
 import torch.distributed as dist
 import torch.distributed._symmetric_memory as symm_mem
-
 import triton
 import triton.language as tl
-from cuda.bindings import driver
 
 from .._ptx_utils import get_flat_tid, send_signal
 
@@ -189,7 +188,7 @@ def gemm_producer_w_progress(
 ):
     M, K = a.shape
     Kb, N = b.shape
-    assert K == Kb, "Inner dimensions must match for matrix multiplication"
+    assert Kb == K, "Inner dimensions must match for matrix multiplication"
     assert a.dtype == b.dtype, "Input dtypes must match"
 
     bT = b.T

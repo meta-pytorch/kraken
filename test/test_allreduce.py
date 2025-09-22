@@ -57,7 +57,7 @@ class TritonAllReduceTest(MultiProcessTestCase):
         input_tensor = input_tensor.normal_()
         symm_mem.rendezvous(input_tensor, group_name)
 
-        result = kraken.all_reduce.one_shot_all_reduce(input_tensor)
+        result = kraken.all_reduce_fusion.one_shot_all_reduce(input_tensor)
 
         golden = input_tensor.clone()
         dist.all_reduce(golden)

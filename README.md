@@ -46,6 +46,10 @@ import torch
 import torch.distributed as dist
 import torch.distributed._symmetric_memory as symm_mem
 import kraken
+import os
+
+# local_rank is needed for device placement, and can be received from the environment
+local_rank = int(os.environ["LOCAL_RANK"])
 
 # Create and initialize a symmetric memory tensor
 # See blog: https://dev-discuss.pytorch.org/t/pytorch-symmetricmemory-harnessing-nvlink-programmability-with-ease/279 for symmetric memory details. 
@@ -54,11 +58,63 @@ a_shared = symm_mem.empty(
         dtype=torch.bfloat16, 
         device=f"cuda:{local_rank}",
     )
-symm_mem.rendezvous(a_shared, dist.group.WORLD.group_name)
+symm_mem.rendezvous(a_shared, group=dist.group.WORLD)
 a_shared = a_shared.normal_()
 
 # Call one_shot_all_reduce kernel from kraken. 
 a = kraken.one_shot_all_reduce(a_shared)
+```
+
+Alternatively, you can build your own custom kernels by leveraging Kraken's low-level primitives. This allows you to create highly optimized kernels tailored to your specific needs. We provide PTX implementations of low-level primitives in `kraken._ptx_utils`.
+
+Here's an example of how to use `kraken._ptx_utils.symm_mem_sync` to synchronize blocks with matching `block_id` across participating devices in a custom kernel. This is often necessary before and after accessing symmetric memory tensors.
+
+```python
+import torch
+import torch.distributed as dist
+import torch.distributed._symmetric_memory as symm_mem
+
+import triton
+import triton.language as tl
+
+import kraken
+import os
+
+@triton.jit
+def custom_distributed_kernel(
+    a_shared_ptrs,
+    a_signal_pad_ptrs,
+    rank: tl.constexpr,
+    world_size: tl.constexpr,
+):
+    # Synchronizes blocks with matching block_id across participating devices.
+    # Ensures that all writes to a_shared from previous kernels across all devices
+    #  are visible to the current kernel:
+    kraken._ptx_utils.symm_mem_sync(
+        a_signal_pad_ptrs,
+        None,
+        rank,
+        world_size,
+        hasPreviousMemAccess=False,
+        hasSubsequentMemAccess=True,
+    )
+    ...  # access a_shared via a_shared_ptrs.
+
+# Create and initialize a symmetric memory tensor
+local_rank = int(os.environ["LOCAL_RANK"])
+a_shared = symm_mem.empty((4096, 4096), dtype=torch.bfloat16, device=f"cuda:{local_rank}")
+symm_mem_hdl = symm_mem.rendezvous(a_shared, group=dist.group.WORLD)
+
+# Define the grid for kernel launch. For simplicity, we use a single thread block.
+grid = (1,)
+
+# Call custom kernel
+custom_distributed_kernel[grid](
+    symm_mem_hdl.buffer_ptrs_dev,
+    symm_mem_hdl.signal_pad_ptrs_dev,
+    rank=symm_mem_hdl.rank,
+    world_size=symm_mem_hdl.world_size,
+)
 ```
 
 
@@ -82,7 +138,7 @@ Kraken is organized for easy hacking of distributed Triton kernel:
 
 
 ### Inline PTX Utils
-
+`kraken._ptx_utils` provides inline ptx implementation of memory barrier synchorinzations that are not natively supported by triton. 
 
 
 

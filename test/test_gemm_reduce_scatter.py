@@ -1,10 +1,9 @@
+from datetime import timedelta
 import os
 import sys
-from datetime import timedelta
 
 import torch
 import torch.distributed as dist
-import torch.distributed._symmetric_memory as symm_mem
 from torch.testing._internal.common_distributed import (
     MultiProcessTestCase,
     skip_if_lt_x_gpu,
@@ -55,10 +54,9 @@ class TritonGemmReduceScatterTest(MultiProcessTestCase):
         group_name = dist.group.WORLD.group_name
 
         # use torch symm mem's fused_matmul_reduce_scatter impl for testing
-        expected_result = torch.ops.symm_mem.fused_matmul_reduce_scatter(
+        return torch.ops.symm_mem.fused_matmul_reduce_scatter(
             a, b, "sum", scatter_dim=0, group_name=group_name
         )
-        return expected_result
 
     @skip_if_lt_x_gpu(4)
     def test_gemm_reduce_scatter(self):
