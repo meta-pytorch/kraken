@@ -7,18 +7,15 @@ import torch
 import torch.distributed as dist
 import torch.distributed._symmetric_memory as symm_mem
 
+import kraken
 from kraken import _logging as log
-from kraken.all_reduce_fusion import (
-    one_shot_all_reduce_bias,
-    two_shot_all_reduce_bias,
-)
 
 
 def one_shot_all_reduce_bias(
     x: torch.Tensor, bias: torch.Tensor, symm_mem_input: torch.Tensor
 ) -> torch.Tensor:
     y = torch.empty_like(x)
-    one_shot_all_reduce_bias(symm_mem_input, x, bias, y)
+    kraken.fused.one_shot_all_reduce_bias(symm_mem_input, x, bias, y)
     return y
 
 
@@ -26,7 +23,7 @@ def two_shot_all_reduce_bias(
     x: torch.Tensor, bias: torch.Tensor, symm_mem_input: torch.Tensor
 ) -> torch.Tensor:
     y = torch.empty_like(x)
-    two_shot_all_reduce_bias(symm_mem_input, x, bias, y)
+    kraken.fused.two_shot_all_reduce_bias(symm_mem_input, x, bias, y)
     return y
 
 

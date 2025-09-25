@@ -1,16 +1,15 @@
 import argparse
+from collections import defaultdict
 import csv
+from dataclasses import asdict, dataclass
 import functools
-import itertools
 import os
 import sys
-from collections import defaultdict
-from dataclasses import asdict, dataclass
 
+from tabulate import tabulate
 import torch
 import torch.distributed as dist
 import torch.distributed._symmetric_memory as symm_mem
-from tabulate import tabulate
 
 # Add the kraken directory to the Python path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -20,18 +19,22 @@ from kraken._logging import benchmark_with_event
 
 
 def torch_symm_mem_gemm_rs(a, b):
-    gemm_rs_output = torch.ops.symm_mem.fused_matmul_reduce_scatter(
+    return torch.ops.symm_mem.fused_matmul_reduce_scatter(
         a, b, "sum", scatter_dim=0, group_name=dist.group.WORLD.group_name
     )
-    return gemm_rs_output
+
 
 def nccl_mem_gemm_rs(a, b):
-    from torch.distributed._functional_collectives import reduce_scatter_tensor, wait_tensor
+    from torch.distributed._functional_collectives import (
+        reduce_scatter_tensor,
+        wait_tensor,
+    )
 
     gemm_output = torch.matmul(a, b)
-    rs_o = reduce_scatter_tensor(gemm_output, "sum", scatter_dim=0, group=dist.group.WORLD)
-    gemm_rs_output = wait_tensor(rs_o)
-    return gemm_rs_output
+    rs_o = reduce_scatter_tensor(
+        gemm_output, "sum", scatter_dim=0, group=dist.group.WORLD
+    )
+    return wait_tensor(rs_o)
 
 
 @dataclass(frozen=True)
@@ -64,15 +67,10 @@ class Experiment:
 
 def generate_experiment_configs(
     dtype: torch.dtype,
-    M: list[int],
-    N: list[int],
-    K: list[int],
+    shapes: list[tuple[int, int, int]],
     backends: list[str],
     device: torch.device,
 ) -> list[ExperimentConfig]:
-    # Generate cross config shapes from M, N, K lists
-    shapes = list(itertools.product(M, N, K))
-
     all_configs = []
     for shape in shapes:
         all_configs.append(
@@ -94,7 +92,7 @@ def get_single_backend_fn(backend: str):
     if backend == "torch_symm_mem":
         return torch_symm_mem_gemm_rs
     if backend == "triton":
-        return kraken.reduce_scatter_fusion.gemm_reduce_scatter
+        return kraken.fused.gemm_reduce_scatter
     raise NotImplementedError(backend)
 
 
@@ -177,9 +175,7 @@ def main(args):
     torch.manual_seed(42 + local_rank)
 
     results = []
-    configs = generate_experiment_configs(
-        args.dtype, args.M, args.N, args.K, args.backend, device
-    )
+    configs = generate_experiment_configs(args.dtype, args.shape, args.backend, device)
     for config in configs:
         results.append(
             Experiment(
@@ -197,7 +193,7 @@ def shape_input_type(s):
         M, N, K = map(int, s.split(","))
         return M, N, K
     except Exception as e:
-        raise argparse.ArgumentTypeError("Heads must be Hq,Hkv") from e
+        raise argparse.ArgumentTypeError("Shape must be M, N, K") from e
 
 
 if __name__ == "__main__":
@@ -229,27 +225,15 @@ benchmark/benchmark_matmul_reduce_scatter.py
     )
 
     parser.add_argument(
-        "-M",
+        "--shape",
         type=shape_input_type,
         nargs="+",
-        default=[2**x for x in range(7, 11)],
-        help="matmul shapes: (M, N, K). (M, K) @ (K, N) -> (M, N)",
-    )
-
-    parser.add_argument(
-        "-N",
-        type=shape_input_type,
-        nargs="+",
-        default=[6656],
-        help="matmul shapes: (M, N, K). (M, K) @ (K, N) -> (M, N)",
-    )
-
-    parser.add_argument(
-        "-K",
-        type=shape_input_type,
-        nargs="+",
-        default=[2**x for x in range(12, 16)],
-        help="matmul shapes: (M, N, K). (M, K) @ (K, N) -> (M, N)",
+        default=[
+            (m, 6656, k)
+            for m in [2**x for x in range(7, 11)]
+            for k in [2**x for x in range(12, 16)]
+        ],
+        help="matmul shapes: M, N, K. (M, K) @ (K, N) -> (M, N)",
     )
 
     parser.add_argument("-dtype", type=str, help="dtype", default="float32")

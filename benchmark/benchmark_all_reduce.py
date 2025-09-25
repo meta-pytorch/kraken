@@ -114,7 +114,7 @@ def get_single_backend_fn(backend: str):
     if backend == "dist_2shot":
         return symm_mem_two_shot_all_reduce
     if backend == "triton_1shot":
-        return kraken.all_reduce.one_shot_all_reduce
+        return kraken.comm.one_shot_all_reduce
     if backend == "nccl":
         return nccl_ring
     raise NotImplementedError(backend)

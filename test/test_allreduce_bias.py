@@ -12,7 +12,7 @@ from torch.testing._internal.common_utils import (
     run_tests,
 )
 
-from kraken.all_reduce_fusion import (
+from kraken.fused import (
     one_shot_all_reduce_bias,
     two_shot_all_reduce_bias,
 )

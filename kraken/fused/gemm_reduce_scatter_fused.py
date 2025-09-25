@@ -61,7 +61,7 @@ def gemm_reduce_scatter_kernel(
 
     # GEMM Computation
     accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
-    for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
+    for k in range(tl.cdiv(K, BLOCK_SIZE_K)):
         a = tl.load(a_ptrs, mask=(offs_k[None, :] < K - k * BLOCK_SIZE_K), other=0.0)
         b = tl.load(b_ptrs, mask=(offs_k[:, None] < K - k * BLOCK_SIZE_K), other=0.0)
         accumulator = tl.dot(a, b, accumulator)
@@ -91,7 +91,7 @@ def gemm_reduce_scatter_kernel(
 
     # synchronize
     ptx_utils.symm_mem_sync(
-        signal_pad_ptrs, None, rank, world_size, hasSubsequenceMemAccess=True
+        signal_pad_ptrs, None, rank, world_size, hasSubsequentMemAccess=True
     )
 
     # Reduce Scatter logic: For each tile in the rank's assigned row slice (along M),
@@ -161,9 +161,9 @@ def gemm_reduce_scatter(a: torch.Tensor, b: torch.Tensor, **kwargs) -> torch.Ten
         Output matrix of shape (M / world_size, N) containing the reduce-scattered result.
     """
 
-    assert (
-        a.shape[1] == b.shape[0]
-    ), "Inner dimensions must match for matrix multiplication"
+    assert a.shape[1] == b.shape[0], (
+        "Inner dimensions must match for matrix multiplication"
+    )
     M, K = a.shape
     _, N = b.shape
 
@@ -171,9 +171,9 @@ def gemm_reduce_scatter(a: torch.Tensor, b: torch.Tensor, **kwargs) -> torch.Ten
     world_size = dist.get_world_size(group)
     rank = dist.get_rank(group)
 
-    assert (
-        M % world_size == 0
-    ), f"M dimension ({M}) must be divisible by world_size ({world_size})"
+    assert M % world_size == 0, (
+        f"M dimension ({M}) must be divisible by world_size ({world_size})"
+    )
 
     # Configuration stuff
     BLOCK_SIZE_M = kwargs.get("BLOCK_SIZE_M", 64)

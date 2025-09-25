@@ -6,7 +6,7 @@ import triton.language as tl
 import triton.tools.experimental_descriptor
 
 from .._ptx_utils import wait_gmem_barrier
-from .copy_engine_all_gather import copy_engine_all_gather_w_progress
+from ..comm import _copy_engine_all_gather_w_progress
 
 
 def _matmul_launch_metadata(grid, kernel, args):
@@ -43,7 +43,11 @@ def _matmul_kernel_tma_persistent_w_progress(
     NUM_SMS: tl.constexpr,
 ):
     """
-    Slightly modified from the sm90 tma persistent Triton tutorial.
+    Persistent Triton kernel for matrix multiplication with progress waiting.
+
+    This kernel performs matrix multiplication (`C = A @ B`) in a persistent manner.
+    It waits for chunks of the `A` matrix to be gathered from other ranks by
+    monitoring a `progress_ptr` before consuming them.
     """
 
     dtype = tl.float8e4nv if FP8_OUTPUT else tl.bfloat16
@@ -237,6 +241,44 @@ def all_gather_matmul(
     progress: torch.Tensor | None = None,
     **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Performs a fused all-gather and matrix multiplication operation.
+
+    This function first performs an all-gather operation on the `a_shared` tensor
+    to construct the full `A` matrix. It then performs a matrix multiplication
+    `C = A @ B`. The all-gather is performed by the copy engine on a separate
+    stream, and the matrix multiplication is performed by a persistent Triton
+    kernel that waits for the data to be gathered.
+
+    Args:
+        a_shared (torch.Tensor): The local shard of the `A` matrix. This must
+            be a symmetric tensor.
+        b (torch.Tensor): The `B` matrix.
+        a_out (torch.Tensor | None, optional): The output tensor for the
+            all-gathered `A` matrix. If None, a new tensor is created.
+        progress (torch.Tensor | None, optional): A tensor for tracking the
+            progress of the all-gather operation. If None, a new tensor is
+            created.
+        **kwargs: Additional keyword arguments for kernel configuration:
+            splits_per_rank (int, optional): The number of splits for the
+                all-gather operation. Defaults to 1.
+            block_size_m (int, optional): The block size for the M dimension.
+                Defaults to 128.
+            block_size_n (int, optional): The block size for the N dimension.
+                Defaults to 256.
+            block_size_k (int, optional): The block size for the K dimension.
+                Defaults to 64.
+            group_size_m (int, optional): The group size for the M dimension.
+                Defaults to 4.
+            num_stages (int, optional): The number of stages for the matmul
+                kernel. Defaults to 3.
+            num_warps (int, optional): The number of warps for the matmul
+                kernel. Defaults to 8.
+
+    Returns:
+        tuple[torch.Tensor, torch.Tensor]: A tuple containing the all-gathered
+            `A` matrix and the result of the matrix multiplication `C`.
+    """
     configs = {
         "SPLITS_PER_RANK": kwargs.get("splits_per_rank", 1),
         "BLOCK_SIZE_M": kwargs.get("block_size_m", 128),
@@ -285,10 +327,12 @@ def all_gather_matmul(
     else:
         progress.fill_(0)  # Reset progress to 0.
 
-    backend_stream = copy_engine_all_gather_w_progress(
+    # Perform all-gather using the copy engine on a backend stream.
+    backend_stream = _copy_engine_all_gather_w_progress(
         a_out, a_shared, progress, configs["SPLITS_PER_RANK"]
     )
 
+    # Perform matrix multiplication on gathered a, which waits for signal of completion for each chunk of a.
     c = _matmul_w_progress(a_out, a_shared, b, progress, configs)
 
     torch.cuda.current_stream().wait_stream(backend_stream)
