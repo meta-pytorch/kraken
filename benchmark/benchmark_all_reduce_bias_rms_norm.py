@@ -13,32 +13,36 @@ from kraken import _logging as log
 
 def one_shot_all_reduce_bias_rms_norm(x, bias, rms_weight, symm_mem_input):
     y = torch.empty_like(x)
-    kraken.all_reduce_fusion.one_shot_all_reduce_bias_rms_norm(symm_mem_input, x, bias, rms_weight, y)
+    kraken.fused.one_shot_all_reduce_bias_rms_norm(
+        symm_mem_input, x, bias, rms_weight, y
+    )
     return y
 
 
 def one_shot_all_reduce_bias_with_rms_norm(x, bias, rms_weight, symm_mem_input):
     y = torch.empty_like(x)
-    kraken.all_reduce_fusion.one_shot_all_reduce_bias(symm_mem_input, x, bias, y)
-    return kraken.all_reduce_fusion.rms_norm(y, rms_weight)
+    kraken.fused.one_shot_all_reduce_bias(symm_mem_input, x, bias, y)
+    return kraken.fused.rms_norm(y, rms_weight)
 
 
 def two_shot_all_reduce_bias_rms_norm(x, bias, rms_weight, symm_mem_input):
     y = torch.empty_like(x)
-    kraken.all_reduce_fusion.two_shot_all_reduce_bias_rms_norm(symm_mem_input, x, bias, rms_weight, y)
+    kraken.fused.two_shot_all_reduce_bias_rms_norm(
+        symm_mem_input, x, bias, rms_weight, y
+    )
     return y
 
 
 def two_shot_all_reduce_bias_with_rms_norm(x, bias, rms_weight, symm_mem_input):
     y = torch.empty_like(x)
-    kraken.all_reduce_fusion.two_shot_all_reduce_bias(symm_mem_input, x, bias, y)
-    return kraken.all_reduce_fusion.rms_norm(y, rms_weight)
+    kraken.fused.two_shot_all_reduce_bias(symm_mem_input, x, bias, y)
+    return kraken.fused.rms_norm(y, rms_weight)
 
 
 def nccl_all_reduce_bias_rms_norm(x, bias, rms_weight):
     dist.all_reduce(x)
     y = x + bias
-    return kraken.all_reduce_fusion.rms_norm(y, rms_weight)
+    return kraken.fused.rms_norm(y, rms_weight)
 
 
 def create_benchmarks(b, t, d_size, device, dtype):

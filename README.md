@@ -23,8 +23,9 @@ Our initial kernels are adapted from the [Symmetric Memory Recipes](https://gith
 ## 🚀 Getting Started
 ### Prerequisites
 - PyTorch (version 2.6.0 or higher)
-- Triton (version 3.3.0 or higher)
+- Triton (version 3.3.0)
 - Python (version 3.10 or higher)
+- CUDA (version 12.4 or higher) Version must matche your PyTorch installaltion.
 
 ### Installation
 ```bash
@@ -48,8 +49,10 @@ import torch.distributed._symmetric_memory as symm_mem
 import kraken
 import os
 
-# local_rank is needed for device placement, and can be received from the environment
+# setup distributed process group. 
 local_rank = int(os.environ["LOCAL_RANK"])
+torch.cuda.set_device(f"cuda:{local_rank}")
+dist.init_process_group("nccl")
 
 # Create and initialize a symmetric memory tensor
 # See blog: https://dev-discuss.pytorch.org/t/pytorch-symmetricmemory-harnessing-nvlink-programmability-with-ease/279 for symmetric memory details. 
@@ -62,7 +65,13 @@ symm_mem.rendezvous(a_shared, group=dist.group.WORLD)
 a_shared = a_shared.normal_()
 
 # Call one_shot_all_reduce kernel from kraken. 
-a = kraken.one_shot_all_reduce(a_shared)
+a = kraken.comm.one_shot_all_reduce(a_shared)
+```
+Remember to run with torchrun! Example torchrun command: 
+```shell
+torchrun --nnodes 1 --nproc-per-node <world_size> \
+    --rdzv-backend c10d --rdzv-endpoint localhost:0 --no_python \
+    python3 example.py
 ```
 
 Alternatively, you can build your own custom kernels by leveraging Kraken's low-level primitives. This allows you to create highly optimized kernels tailored to your specific needs. We provide PTX implementations of low-level primitives in `kraken._ptx_utils`.
@@ -102,6 +111,8 @@ def custom_distributed_kernel(
 
 # Create and initialize a symmetric memory tensor
 local_rank = int(os.environ["LOCAL_RANK"])
+torch.cuda.set_device(f"cuda:{local_rank}")
+dist.init_process_group("nccl")
 a_shared = symm_mem.empty((4096, 4096), dtype=torch.bfloat16, device=f"cuda:{local_rank}")
 symm_mem_hdl = symm_mem.rendezvous(a_shared, group=dist.group.WORLD)
 
@@ -122,19 +133,22 @@ custom_distributed_kernel[grid](
 Kraken is organized for easy hacking of distributed Triton kernel: 
 
 ### Example Kernels
-#### `kraken.all_gather_fusion`
-- `all_gather_matmul`
-#### `kraken.all_reduce_fusion`
-- `rms_norm`,
-- `gemm_one_shot_all_reduce_fused`
--  `one_shot_all_reduce_bias`
-- `one_shot_all_reduce_bias_rms_norm`
-- `two_shot_all_reduce_bias`
-- `two_shot_all_reduce_bias_rms_norm`
+#### `kraken.comm`
+contains communication kernels with fine-grained sychronizations. 
+- `all_gather_w_progress`
 - `one_shot_all_reduce`
-#### `kraken.reduce_scatter_fusion`
-- `gemm_reduce_scatter`
-- `gemm_reduce_scatter_ce_persistent`
+- (coming soon) `two_shot_all_reduce`
+- (coming soon) `multimem_all_reduce`
+#### `kraken.fused`
+Fused communication/computation kernels. 
+- All gather matmul: `all_gather_matmul`
+- Gemm all reduce: `gemm_one_shot_all_reduce_fused`
+- Gemm reduce scatter: `gemm_reduce_scatter`, `gemm_reduce_scatter_ce_persistent`
+- Reduce bias: `one_shot_all_reduce_bias`, `two_shot_all_reduce_bias`
+- Reduce bias rms_norm: `one_shot_all_reduce_bias_rms_norm`, `two_shot_all_reduce_bias_rms_norm` 
+
+#### `kraken.quantized`
+(comming soon) Fused communication/computation kernels with quantization. 
 
 
 ### Inline PTX Utils
@@ -146,10 +160,9 @@ Kraken is organized for easy hacking of distributed Triton kernel:
 Kraken includes a set of benchmarks in `benchmarks/` to evaluate the performance of its kernels. You can run them as follows:
 
 ```bash
-torchrun --nnodes 1 --nproc-per-node 8 \
+torchrun --nnodes 1 --nproc-per-node <world_size> \
 --rdzv-backend c10d --rdzv-endpoint localhost:0 --no_python python3 \
-benchmark/benchmark_all_reduce.py \
---backend nccl,triton_1shot,dist_1shot
+benchmark/benchmark_all_reduce.py 
 # ... and so on for other benchmarks
 ```
 

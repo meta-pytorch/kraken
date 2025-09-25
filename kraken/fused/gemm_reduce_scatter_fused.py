@@ -91,7 +91,7 @@ def gemm_reduce_scatter_kernel(
 
     # synchronize
     ptx_utils.symm_mem_sync(
-        signal_pad_ptrs, None, rank, world_size, hasSubsequenceMemAccess=True
+        signal_pad_ptrs, None, rank, world_size, hasSubsequentMemAccess=True
     )
 
     # Reduce Scatter logic: For each tile in the rank's assigned row slice (along M),

@@ -15,7 +15,7 @@ from torch.testing._internal.common_utils import (
 
 # Adjust the path to import the kernel from the 'kraken' project directory
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-from kraken.reduce_scatter_fusion import (
+from kraken.fused import (
     gemm_reduce_scatter,
     gemm_reduce_scatter_ce_persistent,
 )

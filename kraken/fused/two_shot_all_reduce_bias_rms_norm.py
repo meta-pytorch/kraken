@@ -72,7 +72,7 @@ def two_shot_all_reduce_bias_rms_norm_kernel(
         rank,
         world_size,
         hasPreviousMemAccess=True,
-        hasSubsequenceMemAccess=True,
+        hasSubsequentMemAccess=True,
     )
 
     # Two shot allreduce
@@ -104,7 +104,7 @@ def two_shot_all_reduce_bias_rms_norm_kernel(
         rank,
         world_size,
         hasPreviousMemAccess=True,
-        hasSubsequenceMemAccess=True,
+        hasSubsequentMemAccess=True,
     )
 
     # The regular RMSNorm

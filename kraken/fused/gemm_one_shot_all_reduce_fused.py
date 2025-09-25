@@ -78,7 +78,7 @@ def gemm_one_shot_all_reduce_kernel(
 
     # Synchronize before all-reduce
     ptx_utils.symm_mem_sync(
-        signal_pad_ptrs, None, rank, world_size, hasSubsequenceMemAccess=True
+        signal_pad_ptrs, None, rank, world_size, hasSubsequentMemAccess=True
     )
 
     # All-reduce: sum results from all ranks

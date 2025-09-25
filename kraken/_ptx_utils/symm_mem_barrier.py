@@ -101,7 +101,7 @@ def symm_mem_sync(
     rank: tl.constexpr,
     world_size: tl.constexpr,
     hasPreviousMemAccess: tl.constexpr = False,
-    hasSubsequenceMemAccess: tl.constexpr = False,
+    hasSubsequentMemAccess: tl.constexpr = False,
 ):
     """
     Synchronizes blocks with matching block_id across participating devices.
@@ -112,17 +112,17 @@ def symm_mem_sync(
     Pattern 0: Ensures that all writes to symm_mem buffers from previous
     kernels across all devices are visible to the current kernel:
 
-        symm_mem_sync(..., hasPreviousMemAccess=False, hasSubsequenceMemAccess=True)
+        symm_mem_sync(..., hasPreviousMemAccess=False, hasSubsequentMemAccess=True)
 
     Pattern 1: Ensures that all writes to symm_mem buffers from the current
     block are visible to all remote blocks with matching blockIdx:
 
-        symm_mem_sync(..., hasPreviousMemAccess=True, hasSubsequenceMemAccess=True)
+        symm_mem_sync(..., hasPreviousMemAccess=True, hasSubsequentMemAccess=True)
 
     Pattern 2: Ensures that symm_mem buffers read by the current kernel are safe
     for writing by subsequent kernels across all devices.
 
-        symm_mem_sync(..., hasPreviousMemAccess=True, hasSubsequenceMemAccess=False)
+        symm_mem_sync(..., hasPreviousMemAccess=True, hasSubsequentMemAccess=False)
 
     CUDA graph friendliness:
 
@@ -152,7 +152,7 @@ def symm_mem_sync(
 
     if flat_tid < world_size:
         _send_signal(send_addrs, "release" if hasPreviousMemAccess else "relaxed")
-        _wait_signal(wait_addrs, "acquire" if hasSubsequenceMemAccess else "relaxed")
+        _wait_signal(wait_addrs, "acquire" if hasSubsequentMemAccess else "relaxed")
 
-    if hasSubsequenceMemAccess:
+    if hasSubsequentMemAccess:
         tl.debug_barrier()

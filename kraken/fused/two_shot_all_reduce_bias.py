@@ -60,7 +60,7 @@ def two_shot_all_reduce_bias_kernel(
         rank,
         world_size,
         hasPreviousMemAccess=True,
-        hasSubsequenceMemAccess=True,
+        hasSubsequentMemAccess=True,
     )
 
     # Two-shot allreduce
@@ -95,7 +95,7 @@ def two_shot_all_reduce_bias_kernel(
         rank,
         world_size,
         hasPreviousMemAccess=True,
-        hasSubsequenceMemAccess=True,
+        hasSubsequentMemAccess=True,
     )
 
     # Copy the result from the symmetric memory buffer to the output.

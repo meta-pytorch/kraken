@@ -70,7 +70,7 @@ def one_shot_all_reduce_bias_kernel(
         rank,
         world_size,
         hasPreviousMemAccess=True,
-        hasSubsequenceMemAccess=True,
+        hasSubsequentMemAccess=True,
     )
 
     block_start = pid * BLOCK_SIZE

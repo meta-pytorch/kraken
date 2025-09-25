@@ -15,7 +15,7 @@ def one_shot_all_reduce_bias(
     x: torch.Tensor, bias: torch.Tensor, symm_mem_input: torch.Tensor
 ) -> torch.Tensor:
     y = torch.empty_like(x)
-    kraken.all_reduce_fusion.one_shot_all_reduce_bias(symm_mem_input, x, bias, y)
+    kraken.fused.one_shot_all_reduce_bias(symm_mem_input, x, bias, y)
     return y
 
 
@@ -23,7 +23,7 @@ def two_shot_all_reduce_bias(
     x: torch.Tensor, bias: torch.Tensor, symm_mem_input: torch.Tensor
 ) -> torch.Tensor:
     y = torch.empty_like(x)
-    kraken.all_reduce_fusion.two_shot_all_reduce_bias(symm_mem_input, x, bias, y)
+    kraken.fused.two_shot_all_reduce_bias(symm_mem_input, x, bias, y)
     return y
 
 

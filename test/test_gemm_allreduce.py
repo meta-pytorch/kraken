@@ -58,7 +58,7 @@ class TritonGemmAllReduceTest(MultiProcessTestCase):
         b = torch.empty((K, N), dtype=torch.float32, device=self.device).normal_()
 
         # calculate result for our fused kernel
-        result = kraken.all_reduce_fusion.gemm_one_shot_all_reduce_fused(a, b)
+        result = kraken.fused.gemm_one_shot_all_reduce_fused(a, b)
 
         # expected value
         expected = torch.matmul(a, b)
@@ -78,7 +78,7 @@ class TritonGemmAllReduceTest(MultiProcessTestCase):
         b = torch.empty((K, N), dtype=torch.float32, device=self.device).normal_()
 
         # calculate result for our fused kernel
-        result = kraken.all_reduce_fusion.gemm_one_shot_all_reduce_fused(a, b)
+        result = kraken.fused.gemm_one_shot_all_reduce_fused(a, b)
 
         # expected value
         expected = torch.matmul(a, b)
@@ -103,7 +103,7 @@ class TritonGemmAllReduceTest(MultiProcessTestCase):
         )
         b = torch.ones((K, N), dtype=torch.float32, device=self.device)
 
-        result = kraken.all_reduce_fusion.gemm_one_shot_all_reduce_fused(a, b)
+        result = kraken.fused.gemm_one_shot_all_reduce_fused(a, b)
 
         # Expected: sum of all rank contributions
         # rank 0: 1*K, rank 1: 2*K, rank 2: 3*K, rank 3: 4*K
