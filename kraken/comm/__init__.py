@@ -5,9 +5,13 @@ from .copy_engine_all_gather import (
 from .one_shot_all_reduce import (
     one_shot_all_reduce as one_shot_all_reduce,
 )
+from .two_shot_all_reduce import (
+    two_shot_all_reduce as two_shot_all_reduce,
+)
 
 __all__ = [
     "_copy_engine_all_gather_w_progress",
     "all_gather_w_progress",
     "one_shot_all_reduce",
+    "two_shot_all_reduce",
 ]

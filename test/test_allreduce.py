@@ -66,6 +66,26 @@ class TritonAllReduceTest(MultiProcessTestCase):
 
         dist.destroy_process_group()
 
+    @skip_if_lt_x_gpu(4)
+    def test_two_shot(self):
+        self._init_process()
+        group_name = dist.group.WORLD.group_name
+        input_tensor = symm_mem.empty(
+            (1024, 1024),
+            dtype=torch.bfloat16,
+            device=self.device,
+        )
+        input_tensor = input_tensor.normal_()
+        symm_mem.rendezvous(input_tensor, group_name)
+
+        result = kraken.comm.two_shot_all_reduce(input_tensor)
+
+        golden = input_tensor.clone()
+        dist.all_reduce(golden)
+
+        torch.testing.assert_close(result, golden, rtol=1e-1, atol=1e-1)
+
+        dist.destroy_process_group()
 
 if __name__ == "__main__":
     run_tests()
