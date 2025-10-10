@@ -115,6 +115,8 @@ def get_single_backend_fn(backend: str):
         return symm_mem_two_shot_all_reduce
     if backend == "triton_1shot":
         return kraken.comm.one_shot_all_reduce
+    if backend == "triton_2shot":
+        return kraken.comm.two_shot_all_reduce
     if backend == "nccl":
         return nccl_ring
     raise NotImplementedError(backend)
@@ -233,6 +235,7 @@ benchmark/benchmark_all_reduce.py
         choices=[
             "nccl",
             "triton_1shot",
+            "triton_2shot",
             "dist_multimem",
             "dist_1shot",
             "dist_2shot",

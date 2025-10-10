@@ -15,7 +15,7 @@ In additional to that, it includes a set of benchmarks to help researchers and d
 Our initial kernels are adapted from the [Symmetric Memory Recipes](https://github.com/yifuwang/symm-mem-recipes) by Yifu Wang.
 
 ## 🎯 Features
-- Receipe for high-performance Triton implementations of `all_gather`, `all_reduce`, and `reduce_scatter`.
+- Recipe for high-performance Triton implementations of `all_gather`, `all_reduce` (one-shot and two-shot), and `reduce_scatter`.
 - Comm-comp fused kernels such as `gemm_one_shot_all_reduce_fused` for increased efficiency.
 - A suite of benchmarks to measure and compare the performance of different comm + comp implementations.
 - PTX utilities for synchronization primitives not yet supported by Triton. 
@@ -137,7 +137,7 @@ Kraken is organized for easy hacking of distributed Triton kernel:
 contains communication kernels with fine-grained sychronizations. 
 - `all_gather_w_progress`
 - `one_shot_all_reduce`
-- (coming soon) `two_shot_all_reduce`
+- `two_shot_all_reduce`
 - (coming soon) `multimem_all_reduce`
 #### `kraken.fused`
 Fused communication/computation kernels. 
