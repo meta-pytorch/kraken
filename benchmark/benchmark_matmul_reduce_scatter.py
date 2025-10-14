@@ -223,7 +223,7 @@ benchmark/benchmark_matmul_reduce_scatter.py
             "triton",
             "triton_ce",
         ],
-        default=["nccl", "torch_symm_mem", "triton"],
+        default=["nccl", "torch_symm_mem", "triton_ce"],
         help="Backend to use for Matmul Reduce Scatter. Use first backend as baseline. 'triton' uses gemm_reduce_scatter, 'triton_ce' uses gemm_reduce_scatter_ce_persistent.",
     )
 
