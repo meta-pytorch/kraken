@@ -92,6 +92,8 @@ def get_single_backend_fn(backend: str):
     if backend == "torch_symm_mem":
         return torch_symm_mem_gemm_rs
     if backend == "triton":
+        return kraken.fused.gemm_reduce_scatter
+    if backend == "triton_ce":
         return kraken.fused.gemm_reduce_scatter_ce_persistent
     raise NotImplementedError(backend)
 
@@ -219,9 +221,10 @@ benchmark/benchmark_matmul_reduce_scatter.py
             "nccl",
             "torch_symm_mem",
             "triton",
+            "triton_ce",
         ],
         default=["nccl", "torch_symm_mem", "triton"],
-        help="Backend to use for Matmul Reduce Scatter. Use first backend as baseline.",
+        help="Backend to use for Matmul Reduce Scatter. Use first backend as baseline. 'triton' uses gemm_reduce_scatter, 'triton_ce' uses gemm_reduce_scatter_ce_persistent.",
     )
 
     parser.add_argument(
