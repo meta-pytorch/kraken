@@ -3,7 +3,7 @@ import torch.distributed as dist
 import torch.distributed._symmetric_memory as symm_mem
 import triton
 import triton.language as tl
-import triton.tools.experimental_descriptor
+from triton.tools.tensor_descriptor import TensorDescriptor
 
 from .._ptx_utils import wait_gmem_barrier
 from ..comm import _copy_engine_all_gather_w_progress
@@ -14,8 +14,8 @@ def _matmul_launch_metadata(grid, kernel, args):
     M, N, K = args["M"], args["N"], args["K"]
     ret["name"] = f"{kernel.name} [M={M}, N={N}, K={K}]"
     ret["flops8"] = 2.0 * M * N * K
-    if "c_ptr" in args:
-        bytes_per_elem = args["c_ptr"].element_size()
+    if "c_desc" in args:
+        bytes_per_elem = args["c_desc"].base.element_size()
     else:
         bytes_per_elem = 1 if args["FP8_OUTPUT"] else 2
     ret["bytes"] = bytes_per_elem * (M * K + N * K)
@@ -24,10 +24,10 @@ def _matmul_launch_metadata(grid, kernel, args):
 
 @triton.jit(launch_metadata=_matmul_launch_metadata)
 def _matmul_kernel_tma_persistent_w_progress(
-    a_shared_desc_ptr,
-    a_desc_ptr,
-    b_desc_ptr,
-    c_desc_ptr,
+    a_shared_desc,
+    a_desc,
+    b_desc,
+    c_desc,
     progress_ptr,
     M,
     N,
@@ -68,7 +68,7 @@ def _matmul_kernel_tma_persistent_w_progress(
     pid_n = 0
     offs_am_src = 0
     offs_bn = 0
-    a_ptr = a_desc_ptr
+    current_a_desc = a_desc
 
     num_pid_in_group = GROUP_SIZE_M * num_pid_n
 
@@ -96,7 +96,7 @@ def _matmul_kernel_tma_persistent_w_progress(
             if comm_block_id // NUM_COMM_BLOCKS_PER_RANK == RANK:
                 # Read from the local a_shard
                 offs_am_src = (pid_m * BLOCK_SIZE_M) % COMM_BLOCK_SIZE_M
-                a_ptr = a_shared_desc_ptr
+                current_a_desc = a_shared_desc
             else:
                 # Wait for and read from a_shard copied from remote ranks
                 wait_gmem_barrier(
@@ -107,45 +107,40 @@ def _matmul_kernel_tma_persistent_w_progress(
                     op="ld",
                 )
                 offs_am_src = pid_m * BLOCK_SIZE_M
-                a_ptr = a_desc_ptr
+                current_a_desc = a_desc
 
         offs_bn = pid_n * BLOCK_SIZE_N
         offs_k = ki * BLOCK_SIZE_K
 
-        a = tl._experimental_descriptor_load(
-            a_ptr, [offs_am_src, offs_k], [BLOCK_SIZE_M, BLOCK_SIZE_K], dtype
-        )
-        b = tl._experimental_descriptor_load(
-            b_desc_ptr, [offs_bn, offs_k], [BLOCK_SIZE_N, BLOCK_SIZE_K], dtype
-        )
+        a = current_a_desc.load([offs_am_src, offs_k])
+        b = b_desc.load([offs_bn, offs_k])
         accumulator = tl.dot(a, b.T, accumulator)
 
         if ki == k_tiles - 1:
             c = accumulator.to(dtype)
 
-            tl._experimental_descriptor_store(
-                c_desc_ptr, c, [pid_m * BLOCK_SIZE_M, offs_bn]
-            )
+            c_desc.store([pid_m * BLOCK_SIZE_M, offs_bn], c)
             accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
 
 
 _tma_desc_cache = {}
 
 
-def _create_2d_tma_descriptor(ptr, dim1, dim0, block_dim1, block_dim0, element_size):
+def _create_2d_tma_descriptor(tensor: torch.Tensor, block_dim1: int, block_dim0: int) -> TensorDescriptor:
     global _tma_desc_cache
-    key = (ptr, dim1, dim0, block_dim1, block_dim0, element_size)
-    if key in _tma_desc_cache:
-        return _tma_desc_cache[key]
-    desc = triton.tools.experimental_descriptor.create_2d_tma_descriptor(
-        ptr,
-        dim1,
-        dim0,
-        block_dim1,
-        block_dim0,
-        element_size,
+    block_shape = [int(block_dim1), int(block_dim0)]
+    key = (
+        int(tensor.data_ptr()),
+        tuple(int(size) for size in tensor.shape),
+        tuple(int(stride) for stride in tensor.stride()),
+        tuple(block_shape),
+        tensor.dtype,
+        tensor.device,
     )
-    _tma_desc_cache[key] = desc
+    desc = _tma_desc_cache.get(key)
+    if desc is None:
+        desc = TensorDescriptor.from_tensor(tensor, block_shape)
+        _tma_desc_cache[key] = desc
     return desc
 
 
@@ -160,42 +155,30 @@ def _matmul_w_progress(
     K2, N = b.shape
     assert K2 == K
 
-    bT = b.T
+    bT = b.T.contiguous()
 
     c = torch.empty((M, N), device=a.device, dtype=a.dtype)
 
     desc_a_shared = _create_2d_tma_descriptor(
-        a_shared.data_ptr(),
-        a_shared.shape[0],
-        K,
+        a_shared,
         configs["BLOCK_SIZE_M"],
         configs["BLOCK_SIZE_K"],
-        a_shared.element_size(),
     )
 
     desc_a = _create_2d_tma_descriptor(
-        a.data_ptr(),
-        M,
-        K,
+        a,
         configs["BLOCK_SIZE_M"],
         configs["BLOCK_SIZE_K"],
-        a.element_size(),
     )
     desc_bt = _create_2d_tma_descriptor(
-        bT.data_ptr(),
-        N,
-        K,
+        bT,
         configs["BLOCK_SIZE_N"],
         configs["BLOCK_SIZE_K"],
-        b.element_size(),
     )
     desc_c = _create_2d_tma_descriptor(
-        c.data_ptr(),
-        M,
-        N,
+        c,
         configs["BLOCK_SIZE_M"],
         configs["BLOCK_SIZE_N"],
-        c.element_size(),
     )
 
     configs["NUM_SMS"] = torch.cuda.get_device_properties(

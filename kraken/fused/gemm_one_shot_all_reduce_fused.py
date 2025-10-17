@@ -121,6 +121,8 @@ def gemm_one_shot_all_reduce(
 
     M, K = a.shape
     K, N = b.shape
+    group = kwargs.get("group", None)
+    group = dist.group.WORLD if group is None else group
 
     # Configuration
     BLOCK_SIZE_M = kwargs.get("BLOCK_SIZE_M", 64)
@@ -129,18 +131,19 @@ def gemm_one_shot_all_reduce(
     GROUP_SIZE_M = kwargs.get("GROUP_SIZE_M", 8)
     num_warps = kwargs.get("num_warps", 4)
     num_stages = kwargs.get("num_stages", 3)
-    # Create output tensor and get symmetric memory handle
-    output = torch.empty((M, N), dtype=torch.float32, device=a.device)
-    # Create a buffer for local GEMM results in symmetric memory
-    gemm_buffer = symm_mem.empty((M, N), dtype=torch.float32, device=a.device)
-    symm_mem_hdl = symm_mem.rendezvous(gemm_buffer, group=dist.group.WORLD)
 
-    # Create buffer tuple for all ranks
+    output = torch.empty((M, N), dtype=torch.float32, device=a.device)
+
+    symm_mem_hdl = symm_mem.get_symm_mem_workspace(
+        group.group_name, min_size=M * N * output.element_size()
+    )
+
     buf_list = [
-        symm_mem_hdl.get_buffer(i, tuple((M, N)), torch.float32)
+        symm_mem_hdl.get_buffer(i, [M, N], torch.float32, 0)
         for i in range(symm_mem_hdl.world_size)
     ]
     buf_tuple = tuple(buf_list)
+    gemm_buffer = buf_list[symm_mem_hdl.rank]
 
     # Launch kernel
     def grid(META):
@@ -161,8 +164,8 @@ def gemm_one_shot_all_reduce(
         a.stride(1),
         b.stride(0),
         b.stride(1),
-        output.stride(0),
-        output.stride(1),
+        gemm_buffer.stride(0),
+        gemm_buffer.stride(1),
         rank=symm_mem_hdl.rank,
         world_size=symm_mem_hdl.world_size,
         BLOCK_SIZE_M=BLOCK_SIZE_M,

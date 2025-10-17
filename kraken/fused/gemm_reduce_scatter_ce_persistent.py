@@ -4,6 +4,7 @@ import torch.distributed as dist
 import torch.distributed._symmetric_memory as symm_mem
 import triton
 import triton.language as tl
+from triton.tools.tensor_descriptor import TensorDescriptor
 
 from .._ptx_utils import get_flat_tid, send_signal
 
@@ -12,8 +13,8 @@ def _matmul_launch_metadata(grid, kernel, args):
     ret = {}
     M, N, K = args["M"], args["N"], args["K"]
     ret["name"] = f"{kernel.name} [M={M}, N={N}, K={K}]"
-    if "c_desc_ptr" in args:
-        bytes_per_elem = args["c_desc_ptr"].element_size()
+    if "c_desc" in args:
+        bytes_per_elem = args["c_desc"].base.element_size()
     else:
         bytes_per_elem = 1 if args["FP8_OUTPUT"] else 2
     ret[f"flops{bytes_per_elem * 8}"] = 2.0 * M * N * K
@@ -24,28 +25,29 @@ def _matmul_launch_metadata(grid, kernel, args):
 _tma_desc_cache = {}
 
 
-def _create_2d_tma_descriptor(ptr, dim1, dim0, block_dim1, block_dim0, element_size):
+def _create_2d_tma_descriptor(tensor: torch.Tensor, block_dim1: int, block_dim0: int) -> TensorDescriptor:
     global _tma_desc_cache
-    key = (ptr, dim1, dim0, block_dim1, block_dim0, element_size)
-    if key in _tma_desc_cache:
-        return _tma_desc_cache[key]
-    desc = triton.tools.experimental_descriptor.create_2d_tma_descriptor(
-        ptr,
-        dim1,
-        dim0,
-        block_dim1,
-        block_dim0,
-        element_size,
+    block_shape = [int(block_dim1), int(block_dim0)]
+    key = (
+        int(tensor.data_ptr()),
+        tuple(int(size) for size in tensor.shape),
+        tuple(int(stride) for stride in tensor.stride()),
+        tuple(block_shape),
+        tensor.dtype,
+        tensor.device,
     )
-    _tma_desc_cache[key] = desc
+    desc = _tma_desc_cache.get(key)
+    if desc is None:
+        desc = TensorDescriptor.from_tensor(tensor, block_shape)
+        _tma_desc_cache[key] = desc
     return desc
 
 
 @triton.jit(launch_metadata=_matmul_launch_metadata)
 def _gemm_producer_persistent_kernel(
-    a_desc_ptr,
-    b_desc_ptr,
-    c_desc_ptr,
+    a_desc,
+    b_desc,
+    c_desc,
     progress_ptr,
     signal_pad_ptr,
     M,
@@ -104,17 +106,13 @@ def _gemm_producer_persistent_kernel(
 
         offs_k = ki * BLOCK_SIZE_K
 
-        a = tl._experimental_descriptor_load(
-            a_desc_ptr, [offs_am, offs_k], [BLOCK_SIZE_M, BLOCK_SIZE_K], dtype
-        )
-        b = tl._experimental_descriptor_load(
-            b_desc_ptr, [offs_bn, offs_k], [BLOCK_SIZE_N, BLOCK_SIZE_K], dtype
-        )
+        a = a_desc.load([offs_am, offs_k])
+        b = b_desc.load([offs_bn, offs_k])
         accumulator = tl.dot(a, b.T, accumulator)
 
         if ki == k_tiles - 1:
             c = accumulator.to(dtype)
-            tl._experimental_descriptor_store(c_desc_ptr, c, [offs_am, offs_bn])
+            c_desc.store([offs_am, offs_bn], c)
 
             # calculate progress and send signals to corresponding ranks
             scatter_start = offs_am // M_per_rank
@@ -191,31 +189,22 @@ def gemm_producer_w_progress(
     assert Kb == K, "Inner dimensions must match for matrix multiplication"
     assert a.dtype == b.dtype, "Input dtypes must match"
 
-    bT = b.T
+    bT = b.T.contiguous()
 
     desc_a = _create_2d_tma_descriptor(
-        a.data_ptr(),
-        M,
-        K,
+        a,
         configs["BLOCK_SIZE_M"],
         configs["BLOCK_SIZE_K"],
-        a.element_size(),
     )
     desc_bt = _create_2d_tma_descriptor(
-        bT.data_ptr(),
-        N,
-        K,
+        bT,
         configs["BLOCK_SIZE_N"],
         configs["BLOCK_SIZE_K"],
-        bT.element_size(),
     )
     desc_c = _create_2d_tma_descriptor(
-        gemm_out.data_ptr(),
-        M,
-        N,
+        gemm_out,
         configs["BLOCK_SIZE_M"],
         configs["BLOCK_SIZE_N"],
-        gemm_out.element_size(),
     )
 
     configs["NUM_SMS"] = torch.cuda.get_device_properties(
@@ -255,8 +244,8 @@ def gemm_producer_w_progress(
 
 @triton.jit
 def _reduce_persistent_kernel(
-    in_desc_ptr,  # [M, N]
-    out_desc_ptr,  # [M_per_rank, N]
+    in_desc,  # [M, N]
+    out_desc,  # [M_per_rank, N]
     M_per_rank,
     N,
     RANK: tl.constexpr,
@@ -273,31 +262,23 @@ def _reduce_persistent_kernel(
         tile_id_m = tile_id // num_tiles_n
         tile_id_n = tile_id % num_tiles_n
         cur_rank = (RANK + 1) % WORLD_SIZE
-        accum = tl._experimental_descriptor_load(
-            in_desc_ptr,
+        accum = in_desc.load(
             [
                 tile_id_m * BLOCK_SIZE_M + cur_rank * M_per_rank,
                 tile_id_n * BLOCK_SIZE_N,
-            ],
-            [BLOCK_SIZE_M, BLOCK_SIZE_N],
-            tl.bfloat16,
+            ]
         )
         for i in range(1, WORLD_SIZE):
             cur_rank = (i + RANK + 1) % WORLD_SIZE
-            data = tl._experimental_descriptor_load(
-                in_desc_ptr,
+            data = in_desc.load(
                 [
                     tile_id_m * BLOCK_SIZE_M + cur_rank * M_per_rank,
                     tile_id_n * BLOCK_SIZE_N,
-                ],
-                [BLOCK_SIZE_M, BLOCK_SIZE_N],
-                tl.bfloat16,
+                ]
             )
             accum += data
 
-        tl._experimental_descriptor_store(
-            out_desc_ptr, accum, [tile_id_m * BLOCK_SIZE_M, tile_id_n * BLOCK_SIZE_N]
-        )
+        out_desc.store([tile_id_m * BLOCK_SIZE_M, tile_id_n * BLOCK_SIZE_N], accum)
 
 
 def reduce(
@@ -312,21 +293,15 @@ def reduce(
     BLOCK_SIZE_M = 256
     BLOCK_SIZE_N = 64
 
-    in_desc_ptr = _create_2d_tma_descriptor(
-        inp.data_ptr(),
-        M,
-        N,
+    in_desc = _create_2d_tma_descriptor(
+        inp,
         BLOCK_SIZE_M,
         BLOCK_SIZE_N,
-        inp.element_size(),
     )
-    out_desc_ptr = _create_2d_tma_descriptor(
-        output.data_ptr(),
-        M_per_rank,
-        N,
+    out_desc = _create_2d_tma_descriptor(
+        output,
         BLOCK_SIZE_M,
         BLOCK_SIZE_N,
-        output.element_size(),
     )
 
     grid = lambda META: (  # noqa: E731
@@ -334,8 +309,8 @@ def reduce(
         * triton.cdiv(N, META["BLOCK_SIZE_N"]),
     )
     _reduce_persistent_kernel[grid](
-        in_desc_ptr,
-        out_desc_ptr,
+        in_desc,
+        out_desc,
         M_per_rank,
         N,
         RANK=configs["RANK"],
