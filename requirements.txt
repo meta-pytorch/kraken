@@ -1,6 +1,4 @@
-# Saw a worse performance when using older triton version.
-# This will ensure that people can reproduce the same performance.
-triton == 3.3.0
-torch >= 2.6.0; python_version >= "3.10"
+torch >= 2.8.0
+tabulate
 tyro
 cuda-bindings

@@ -87,5 +87,6 @@ class TritonAllReduceTest(MultiProcessTestCase):
 
         dist.destroy_process_group()
 
+
 if __name__ == "__main__":
     run_tests()

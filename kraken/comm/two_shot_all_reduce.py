@@ -133,9 +133,9 @@ def two_shot_all_reduce(tensor: torch.Tensor, **kwargs) -> torch.Tensor:
     assert config["BLOCK_SIZE"] % world_size == 0, (
         "BLOCK_SIZE must be divisible by world_size for two-shot all-reduce"
     )
-    
+
     num_blocks = min(
-        triton.cdiv(tensor.numel(), config["BLOCK_SIZE"] * world_size), 
+        triton.cdiv(tensor.numel(), config["BLOCK_SIZE"] * world_size),
         config["max_num_blocks"]
     )
 

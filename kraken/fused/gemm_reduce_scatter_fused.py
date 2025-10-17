@@ -167,7 +167,8 @@ def gemm_reduce_scatter(a: torch.Tensor, b: torch.Tensor, **kwargs) -> torch.Ten
     M, K = a.shape
     _, N = b.shape
 
-    group = kwargs.get("group", dist.group.WORLD)
+    group = kwargs.get("group")
+    group = dist.group.WORLD if group is None else group
     world_size = dist.get_world_size(group)
     rank = dist.get_rank(group)
 
@@ -175,7 +176,7 @@ def gemm_reduce_scatter(a: torch.Tensor, b: torch.Tensor, **kwargs) -> torch.Ten
         f"M dimension ({M}) must be divisible by world_size ({world_size})"
     )
 
-    # Configuration stuff
+    # Configuration
     BLOCK_SIZE_M = kwargs.get("BLOCK_SIZE_M", 64)
     BLOCK_SIZE_N = kwargs.get("BLOCK_SIZE_N", 64)
     BLOCK_SIZE_K = kwargs.get("BLOCK_SIZE_K", 32)
@@ -183,22 +184,21 @@ def gemm_reduce_scatter(a: torch.Tensor, b: torch.Tensor, **kwargs) -> torch.Ten
     num_warps = kwargs.get("num_warps", 4)
     num_stages = kwargs.get("num_stages", 3)
     assert a.dtype == b.dtype, "Input tensors must have the same dtype"
-    assert a.dtype == torch.float32, "Only float32 is supported for now"
 
     M_scatter = M // world_size
     # Create output tensor for the scattered result
     output = torch.empty((M_scatter, N), dtype=a.dtype, device=a.device)
 
-    # Create a symmetric buffer for the GEMM results
-    gemm_buffer = symm_mem.empty((M, N), dtype=a.dtype, device=a.device)
-    symm_mem_hdl = symm_mem.rendezvous(gemm_buffer, group=group)
+    symm_mem_hdl = symm_mem.get_symm_mem_workspace(
+        group.group_name, min_size=M * N * a.element_size()
+    )
 
-    # Create buffer tuple for all ranks
     buf_list = [
-        symm_mem_hdl.get_buffer(i, tuple((M, N)), a.dtype)
+        symm_mem_hdl.get_buffer(i, [M, N], a.dtype, 0)
         for i in range(symm_mem_hdl.world_size)
     ]
     buf_tuple = tuple(buf_list)
+    gemm_buffer = buf_list[rank]
 
     # Launch kernel
     def grid(META):
