@@ -167,7 +167,7 @@ def gemm_reduce_scatter(a: torch.Tensor, b: torch.Tensor, **kwargs) -> torch.Ten
     M, K = a.shape
     _, N = b.shape
 
-    group = kwargs.get("group", None)
+    group = kwargs.get("group")
     group = dist.group.WORLD if group is None else group
     world_size = dist.get_world_size(group)
     rank = dist.get_rank(group)
@@ -176,7 +176,7 @@ def gemm_reduce_scatter(a: torch.Tensor, b: torch.Tensor, **kwargs) -> torch.Ten
         f"M dimension ({M}) must be divisible by world_size ({world_size})"
     )
 
-    # Configuration 
+    # Configuration
     BLOCK_SIZE_M = kwargs.get("BLOCK_SIZE_M", 64)
     BLOCK_SIZE_N = kwargs.get("BLOCK_SIZE_N", 64)
     BLOCK_SIZE_K = kwargs.get("BLOCK_SIZE_K", 32)

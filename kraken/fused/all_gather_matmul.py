@@ -128,12 +128,12 @@ _tma_desc_cache = {}
 
 def _create_2d_tma_descriptor(tensor: torch.Tensor, block_dim1: int, block_dim0: int) -> TensorDescriptor:
     global _tma_desc_cache
-    block_shape = [int(block_dim1), int(block_dim0)]
+    block_shape = (int(block_dim1), int(block_dim0))
     key = (
         int(tensor.data_ptr()),
-        tuple(int(size) for size in tensor.shape),
-        tuple(int(stride) for stride in tensor.stride()),
-        tuple(block_shape),
+        tuple(tensor.shape),
+        tuple(tensor.stride()),
+        block_shape,
         tensor.dtype,
         tensor.device,
     )
@@ -155,7 +155,9 @@ def _matmul_w_progress(
     K2, N = b.shape
     assert K2 == K
 
-    bT = b.T.contiguous()
+    bT = b.T
+    if not bT.is_contiguous():
+        raise ValueError("b.T must be contiguous")
 
     c = torch.empty((M, N), device=a.device, dtype=a.dtype)
 

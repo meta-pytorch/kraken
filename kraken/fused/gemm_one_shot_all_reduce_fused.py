@@ -121,7 +121,7 @@ def gemm_one_shot_all_reduce(
 
     M, K = a.shape
     K, N = b.shape
-    group = kwargs.get("group", None)
+    group = kwargs.get("group")
     group = dist.group.WORLD if group is None else group
 
     # Configuration
