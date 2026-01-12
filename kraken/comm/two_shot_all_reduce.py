@@ -136,7 +136,7 @@ def two_shot_all_reduce(tensor: torch.Tensor, **kwargs) -> torch.Tensor:
 
     num_blocks = min(
         triton.cdiv(tensor.numel(), config["BLOCK_SIZE"] * world_size),
-        config["max_num_blocks"]
+        config["max_num_blocks"],
     )
 
     kernel = two_shot_all_reduce_kernel[(num_blocks,)](
