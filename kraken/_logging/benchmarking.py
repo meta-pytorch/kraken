@@ -160,4 +160,7 @@ def benchmark_with_event(
     latencies = [
         b.elapsed_time(e) for b, e in zip(begin_events, end_events, strict=False)
     ]
-    return torch.tensor(latencies).median().item() * 1000
+    latencies_tensor = torch.tensor(latencies)
+    median_us = latencies_tensor.median().item() * 1000
+    std_us = latencies_tensor.std().item() * 1000
+    return median_us, std_us
