@@ -1,3 +1,8 @@
+from .context_parallel_comm import (
+    FlexCPMaskedGather,
+    get_required_blocks,
+    init_nvshmem,
+)
 from .copy_engine_all_gather import (
     _copy_engine_all_gather_w_progress,
     all_gather_w_progress,
@@ -10,8 +15,11 @@ from .two_shot_all_reduce import (
 )
 
 __all__ = [
+    "FlexCPMaskedGather",
     "_copy_engine_all_gather_w_progress",
     "all_gather_w_progress",
+    "get_required_blocks",
+    "init_nvshmem",
     "one_shot_all_reduce",
     "two_shot_all_reduce",
 ]
