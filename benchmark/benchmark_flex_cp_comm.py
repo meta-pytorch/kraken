@@ -1,11 +1,15 @@
 import gc
 import os
 import random
+import logging
+import triton
 
 import click
 import torch
 import torch.distributed as dist
+from torch.distributed.elastic.multiprocessing.errors import record
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
+import torch.distributed._symmetric_memory._nvshmem_triton as nvshmem
 import torch.distributed.distributed_c10d as c10d
 from torch.distributed.tensor.experimental._attention import (
     _context_parallel_shard,
@@ -92,6 +96,16 @@ def get_document_mask_mod(batch: torch.Tensor, eos_id: int) -> _mask_mod_signatu
     return document_mask
 
 
+@nvshmem.requires_nvshmem
+@triton.jit
+def barrier_all_kernel():
+    nvshmem.barrier_all()
+
+
+def barrier_all():
+    barrier_all_kernel[(1,)](num_ctas=1)
+
+
 def cp_shard(
     mesh: DeviceMesh,
     inputs: tuple[torch.Tensor, ...],
@@ -129,6 +143,7 @@ def cp_shard(
     return inputs, mask, load_balancer
 
 
+@record
 def benchmark(
     batch_size: int,
     nheads: int,
@@ -140,7 +155,7 @@ def benchmark(
     load_balancer_type: str,
     num_layers: int,
     num_iterations: int,
-    dp_size: int,
+    cp_size: int,
 ):
     """Benchmark FlexAttention with flex_cp_allgather vs mask-aware communication.
 
@@ -163,11 +178,11 @@ def benchmark(
     dtype = torch.bfloat16
 
     # Setup that only needs to happen once (outside iteration loop)
-    cp_size = world_size // dp_size
+    tp_size = world_size // cp_size
     world_mesh = init_device_mesh(
         device_type="cuda", mesh_shape=(world_size,), mesh_dim_names=("world",)
     )
-    device_mesh = world_mesh._unflatten(0, (dp_size, cp_size), ("dp", "cp"))["dp"]
+    device_mesh = world_mesh._unflatten(0, (cp_size, tp_size), ("cp", "tp"))["cp"]
     pg_name = c10d._get_process_group_name(device_mesh.get_group())
 
     # Compile functions once with max-autotune for best performance
@@ -277,6 +292,7 @@ def benchmark(
         allgather_comm_end.record()
         torch.cuda.synchronize()
         dist.barrier()
+        logging.info("Benchmark Allgather Done")
 
         # 2. MaskAware communication loop (measure entire loop)
         mask_aware_comm_start.record()
@@ -287,7 +303,7 @@ def benchmark(
         mask_aware_comm_end.record()
         torch.cuda.synchronize()
         dist.barrier()
-        return
+        logging.info("Benchmark MaskedGather is Done")
 
         # 3. FlexAttention compute loop (per-operation measurement)
         for layer in range(num_layers):
@@ -302,6 +318,7 @@ def benchmark(
             flex_attn_events[layer][1].record()
         torch.cuda.synchronize()
         dist.barrier()
+        logging.info("Benchmark FlexAttention Done")
 
         # 4. Total AllGather (comm + compute) loop (per-operation measurement)
         for layer in range(num_layers):
@@ -317,6 +334,7 @@ def benchmark(
             total_allgather_events[layer][1].record()
         torch.cuda.synchronize()
         dist.barrier()
+        logging.info("Benchmark Allgather + FlexAttention Done")
 
         # 5. Total MaskAware (comm + compute) loop (per-operation measurement)
         for layer in range(num_layers):
@@ -334,6 +352,7 @@ def benchmark(
             total_mask_aware_events[layer][1].record()
         torch.cuda.synchronize()
         dist.barrier()
+        logging.info("Benchmark MaskedGather + FlexAttention Done")
 
         # Skip warmup iteration
         if is_warmup:
@@ -640,7 +659,9 @@ def test(
     default=20,
     help="Number of iterations with different random inputs",
 )
-@click.option("--dp_size", default=1, help="Data parallel size (outer mesh dimension)")
+@click.option(
+    "--cp_size", default=1, help="Context parallel size (outer mesh dimension)"
+)
 @click.option("--test_mode", default=False, is_flag=True)
 def main(
     batch_size: int,
@@ -653,7 +674,7 @@ def main(
     load_balancer: str,
     layers: int,
     iterations: int,
-    dp_size: int,
+    cp_size: int,
     test_mode: bool,
 ):
     """
@@ -664,13 +685,12 @@ def main(
     """
     local_rank = int(os.environ["LOCAL_RANK"])
 
-    print("Before init_process_group")
     device = torch.device(f"cuda:{local_rank}")
     torch.cuda.set_device(device)
     dist.init_process_group("nccl", device_id=device)
     torch.manual_seed(42)
     random.seed(42)
-    print("After init_process_group")
+    logging.info("init_process_group is done")
     dist.barrier()
 
     if test_mode:
@@ -696,9 +716,9 @@ def main(
             load_balancer,
             layers,
             iterations,
-            dp_size,
+            cp_size,
         )
-
+    logging.info("Before destroy process group")
     dist.destroy_process_group()
 
 

@@ -1,5 +1,6 @@
 import contextlib
 import os
+import logging
 
 import torch
 import torch.distributed as dist
@@ -27,11 +28,11 @@ def init_nvshmem() -> None:
         It is okay if set_backend() fails (e.g., if called multiple times
         from multiple FlexCPMaskedGather instances).
     """
-    print("Calling init_nvshmem")
+    logging.info("Calling init_nvshmem")
     if not symm_mem.is_nvshmem_available():
         raise RuntimeError("NVSHMEM is not available but TORCH_SYMMMEM=NVSHMEM is set")
 
-    print("Using NVSHMEM backend for symmetric memory")
+    logging.info("Using NVSHMEM backend for symmetric memory")
     with contextlib.suppress(RuntimeError):
         symm_mem.set_backend("NVSHMEM")
 
@@ -288,6 +289,7 @@ def copy_valid_blocks_kernel_nvshmem(
     output_v_ptr,
     blocks_ptr,
     valid_blocks_ptr,
+    group_to_global_ptr,
     B: tl.constexpr,
     H: tl.constexpr,
     KV_per_rank: tl.constexpr,
@@ -301,26 +303,28 @@ def copy_valid_blocks_kernel_nvshmem(
     BLOCK_HIDDEN: tl.constexpr,
 ):
     """
-    NVSHMEM Triton kernel for copying valid blocks using nvshmem.get().
+    NVSHMEM Triton kernel for copying valid blocks using nvshmem.get_nbi().
 
-    Uses nvshmem.get to fetch data directly into the output buffer,
-    avoiding temp buffer race conditions between parallel programs.
+    Optimized to transfer larger chunks: for each (batch, kv_block, h_tile),
+    we transfer block_size * BLOCK_HIDDEN elements at once per H value.
+    This reduces the number of nvshmem calls from O(block_size * H) to O(H).
+
+    Args:
+        group_to_global_ptr: Pointer to tensor mapping group rank -> global PE ID.
+                            Used to convert local src_rank to global PE for NVSHMEM.
     """
     pid = tl.program_id(axis=0)
 
-    # Calculate grid dimensions
+    # Simplified grid: one program per (batch, kv_block, h_tile)
+    # Each program handles all hidden_tiles and all kv_offsets within the block
     h_tiles = tl.cdiv(H, BLOCK_H)
-    hidden_tiles = tl.cdiv(hidden, BLOCK_HIDDEN)
-    tiles_per_kv_block = h_tiles * hidden_tiles
-    total_tiles_per_batch = max_kv_blocks * tiles_per_kv_block
+    total_tiles_per_batch = max_kv_blocks * h_tiles
 
     # Decompose program ID
     batch_idx = pid // total_tiles_per_batch
     remaining = pid % total_tiles_per_batch
-    kv_block_idx = remaining // tiles_per_kv_block
-    tile_idx = remaining % tiles_per_kv_block
-    h_tile_idx = tile_idx // hidden_tiles
-    hidden_tile_idx = tile_idx % hidden_tiles
+    kv_block_idx = remaining // h_tiles
+    h_tile_idx = remaining % h_tiles
 
     if batch_idx >= B:
         return
@@ -333,106 +337,106 @@ def copy_valid_blocks_kernel_nvshmem(
     # Load the block number
     block_num = tl.load(blocks_ptr + batch_idx * max_kv_blocks + kv_block_idx)
 
-    # Calculate rank and local block index
+    # Calculate local group rank and local block index
     blocks_per_rank = KV_per_rank // block_size
-    src_pe = block_num // blocks_per_rank
+    src_group_rank = block_num // blocks_per_rank
     rank_block_idx = block_num % blocks_per_rank
 
-    # Compute H and hidden indices for this tile
+    # Convert local group rank to global PE ID for NVSHMEM
+    src_pe = tl.load(group_to_global_ptr + src_group_rank).to(tl.int32)
+
+    # Compute H indices for this tile
     h_start = h_tile_idx * BLOCK_H
-    h_offsets = h_start + tl.arange(0, BLOCK_H)
-    h_mask = h_offsets < H
 
-    hidden_start = hidden_tile_idx * BLOCK_HIDDEN
-    hidden_offsets = hidden_start + tl.arange(0, BLOCK_HIDDEN)
-    hidden_mask = hidden_offsets < hidden
+    # Transfer size: block_size * hidden elements per H value
+    # This is contiguous in memory for a single H
+    transfer_size = block_size * hidden
 
-    # Create 2D mask
-    mask_2d = h_mask[:, None] & hidden_mask[None, :]
+    if src_pe != my_pe:
+        # For remote PE, transfer entire block_size * hidden chunk per H
+        for h_idx in tl.static_range(BLOCK_H):
+            h_val = h_start + h_idx
+            if h_val < H:
+                # Source offset: start of this H's block data
+                # Memory layout: (B, H, KV, hidden) - for fixed B,H, KV*hidden is contiguous
+                src_offset = (
+                    batch_idx * (H * KV_per_rank * hidden)
+                    + h_val * (KV_per_rank * hidden)
+                    + rank_block_idx * block_size * hidden
+                )
 
-    # Copy all KV positions in the block for this (H, hidden) tile
-    for kv_offset in range(block_size):
-        # Compute source indices in sharded tensors
-        kv_pos_src = rank_block_idx * block_size + kv_offset
+                # Destination offset
+                dst_offset = (
+                    batch_idx * (H * KV_total * hidden)
+                    + h_val * (KV_total * hidden)
+                    + block_num * block_size * hidden
+                )
 
-        # Compute destination indices in output tensors
-        kv_pos_dst = block_num * block_size + kv_offset
+                # Transfer entire block_size * hidden elements at once
+                nvshmem.get(
+                    output_k_ptr + dst_offset,
+                    sharded_k_ptr + src_offset,
+                    BLOCK_HIDDEN,
+                    src_pe,
+                )
+                nvshmem.get(
+                    output_v_ptr + dst_offset,
+                    sharded_v_ptr + src_offset,
+                    transfer_size,
+                    src_pe,
+                )
+    else:
+        # Local PE - use standard load/store with vectorized access
+        h_offsets = h_start + tl.arange(0, BLOCK_H)
+        h_mask = h_offsets < H
+        hidden_offsets = tl.arange(0, BLOCK_HIDDEN)
 
-        if src_pe != my_pe:
-            # For remote PE, use nvshmem.get to fetch directly to output
-            # Fetch each row (h value) separately since data is strided
-            for h_idx in tl.static_range(BLOCK_H):
-                h_val = h_start + h_idx
-                if h_val < H:
-                    # Source: contiguous BLOCK_HIDDEN elements
-                    src_offset = (
-                        batch_idx * (H * KV_per_rank * hidden)
-                        + h_val * (KV_per_rank * hidden)
-                        + kv_pos_src * hidden
-                        + hidden_start
-                    )
+        for kv_offset in range(block_size):
+            kv_pos_src = rank_block_idx * block_size + kv_offset
+            kv_pos_dst = block_num * block_size + kv_offset
 
-                    # Destination: directly in output buffer
-                    dst_offset = (
-                        batch_idx * (H * KV_total * hidden)
-                        + h_val * (KV_total * hidden)
-                        + kv_pos_dst * hidden
-                        + hidden_start
-                    )
+            # Process all hidden tiles
+            for hidden_tile_idx in range(tl.cdiv(hidden, BLOCK_HIDDEN)):
+                hidden_start = hidden_tile_idx * BLOCK_HIDDEN
+                cur_hidden_offsets = hidden_start + hidden_offsets
+                hidden_mask = cur_hidden_offsets < hidden
+                mask_2d = h_mask[:, None] & hidden_mask[None, :]
 
-                    # Fetch BLOCK_HIDDEN elements directly to output
-                    nvshmem.get(
-                        output_k_ptr,
-                        sharded_k_ptr,
-                        BLOCK_HIDDEN,
-                        src_pe,
-                    )
-                    """
-                    nvshmem.get(
-                        output_v_ptr + dst_offset,
-                        sharded_v_ptr + src_offset,
-                        BLOCK_HIDDEN,
-                        src_pe,
-                    )
-                    """
-        else:
-            # Load directly from local buffer
-            src_k_ptrs = (
-                sharded_k_ptr
-                + batch_idx * (H * KV_per_rank * hidden)
-                + h_offsets[:, None] * (KV_per_rank * hidden)
-                + kv_pos_src * hidden
-                + hidden_offsets[None, :]
-            )
-            src_v_ptrs = (
-                sharded_v_ptr
-                + batch_idx * (H * KV_per_rank * hidden)
-                + h_offsets[:, None] * (KV_per_rank * hidden)
-                + kv_pos_src * hidden
-                + hidden_offsets[None, :]
-            )
-            vals_k = tl.load(src_k_ptrs, mask=mask_2d)
-            vals_v = tl.load(src_v_ptrs, mask=mask_2d)
+                # Load from local buffer
+                src_k_ptrs = (
+                    sharded_k_ptr
+                    + batch_idx * (H * KV_per_rank * hidden)
+                    + h_offsets[:, None] * (KV_per_rank * hidden)
+                    + kv_pos_src * hidden
+                    + cur_hidden_offsets[None, :]
+                )
+                src_v_ptrs = (
+                    sharded_v_ptr
+                    + batch_idx * (H * KV_per_rank * hidden)
+                    + h_offsets[:, None] * (KV_per_rank * hidden)
+                    + kv_pos_src * hidden
+                    + cur_hidden_offsets[None, :]
+                )
+                vals_k = tl.load(src_k_ptrs, mask=mask_2d)
+                vals_v = tl.load(src_v_ptrs, mask=mask_2d)
 
-            # Compute destination pointers
-            dst_k_ptrs = (
-                output_k_ptr
-                + batch_idx * (H * KV_total * hidden)
-                + h_offsets[:, None] * (KV_total * hidden)
-                + kv_pos_dst * hidden
-                + hidden_offsets[None, :]
-            )
-            dst_v_ptrs = (
-                output_v_ptr
-                + batch_idx * (H * KV_total * hidden)
-                + h_offsets[:, None] * (KV_total * hidden)
-                + kv_pos_dst * hidden
-                + hidden_offsets[None, :]
-            )
-
-            # Store K and V
-            tl.store(dst_k_ptrs, vals_k, mask=mask_2d)
-            tl.store(dst_v_ptrs, vals_v, mask=mask_2d)
+                # Store to output
+                dst_k_ptrs = (
+                    output_k_ptr
+                    + batch_idx * (H * KV_total * hidden)
+                    + h_offsets[:, None] * (KV_total * hidden)
+                    + kv_pos_dst * hidden
+                    + cur_hidden_offsets[None, :]
+                )
+                dst_v_ptrs = (
+                    output_v_ptr
+                    + batch_idx * (H * KV_total * hidden)
+                    + h_offsets[:, None] * (KV_total * hidden)
+                    + kv_pos_dst * hidden
+                    + cur_hidden_offsets[None, :]
+                )
+                tl.store(dst_k_ptrs, vals_k, mask=mask_2d)
+                tl.store(dst_v_ptrs, vals_v, mask=mask_2d)
 
 
 def _copy_valid_blocks_triton(
@@ -444,6 +448,7 @@ def _copy_valid_blocks_triton(
     output_v: torch.Tensor,
     block_size: int = 128,
     group_name: str | None = None,
+    group_to_global: torch.Tensor | None = None,
 ) -> None:
     """
     Triton-accelerated version of copy_valid_blocks using symmetric memory.
@@ -465,6 +470,9 @@ def _copy_valid_blocks_triton(
         block_size: Size of each block in elements (default: 128).
         group_name: Process group name for symmetric memory operations.
                    If None, uses WORLD group.
+        group_to_global: Tensor mapping group rank to global rank for NVSHMEM.
+                        Shape (world_size,). Required when using NVSHMEM with
+                        sub-groups where local rank != global PE ID.
 
     Note:
         sharded_k and sharded_v must be allocated using symm_mem.empty() and
@@ -495,20 +503,29 @@ def _copy_valid_blocks_triton(
     num_programs = B * total_tiles_per_batch
 
     if _NVSHMEM_ENV:
-        copy_valid_blocks_kernel_nvshmem[(num_programs,)](
+        # For NVSHMEM kernel, grid is (batch, kv_block, h_tile) - no hidden_tiles
+        # since each program handles the entire hidden dimension
+        nvshmem_tiles_per_batch = max_kv_blocks * h_tiles
+        nvshmem_num_programs = B * nvshmem_tiles_per_batch
+
+        # Convert local rank to global PE ID
+        my_global_pe = dist.get_rank()
+
+        copy_valid_blocks_kernel_nvshmem[(nvshmem_num_programs,)](
             sharded_k,
             sharded_v,
             output_k,
             output_v,
             blocks,
             valid_blocks,
+            group_to_global,
             B=B,
             H=H,
             KV_per_rank=KV_per_rank,
             KV_total=KV_total,
             hidden=hidden,
             block_size=block_size,
-            my_pe=rank,
+            my_pe=my_global_pe,
             n_pes=world_size,
             max_kv_blocks=max_kv_blocks,
             BLOCK_H=BLOCK_H,
@@ -587,7 +604,6 @@ class FlexCPMaskedGather:
         Raises:
             RuntimeError: If TORCH_SYMMMEM=NVSHMEM but NVSHMEM is not available.
         """
-        print("FlexCPMaskedGather.__init__()")
         self._k_symm: torch.Tensor | None = None
         self._v_symm: torch.Tensor | None = None
         self._compiled_get_required_blocks = None
@@ -599,12 +615,13 @@ class FlexCPMaskedGather:
         self._cached_valid_blocks: torch.Tensor | None = None
         self._cached_block_size: int | None = None
 
+        # Cache for group-to-global rank mapping (for NVSHMEM)
+        self._cached_mesh = None
+        self._cached_group_to_global: torch.Tensor | None = None
+
         # Initialize NVSHMEM if requested
         if _NVSHMEM_ENV:
             init_nvshmem()
-        symm_mem.enable_symm_mem_for_group(
-            dist.distributed_c10d._get_process_group_name(dist.group.WORLD)
-        )
         dist.barrier()
 
     def _ensure_symm_memory(
@@ -638,14 +655,12 @@ class FlexCPMaskedGather:
 
         if need_alloc:
             # Enable symmetric memory for the group before allocation
-            symm_mem.enable_symm_mem_for_group(group_name)
-
             self._k_symm = symm_mem.empty(shape, dtype=dtype, device=device)
             self._v_symm = symm_mem.empty(shape, dtype=dtype, device=device)
 
-        # Rendezvous to make symmetric memory accessible across ranks
-        symm_mem.rendezvous(self._k_symm, group_name)
-        symm_mem.rendezvous(self._v_symm, group_name)
+            # Rendezvous to make symmetric memory accessible across ranks
+            symm_mem.rendezvous(self._k_symm, group_name)
+            symm_mem.rendezvous(self._v_symm, group_name)
 
         # Copy input tensors to symmetric memory
         self._k_symm.copy_(sharded_k)
@@ -687,6 +702,42 @@ class FlexCPMaskedGather:
         valid_blocks = (blocks != sentinel).sum(dim=1).to(torch.int32)
 
         return blocks, valid_blocks, block_size
+
+    def _get_group_to_global_mapping(
+        self,
+        mesh: "torch.distributed.device_mesh.DeviceMesh",
+        device: torch.device,
+    ) -> torch.Tensor:
+        """Get or create a cached group-to-global rank mapping tensor.
+
+        For NVSHMEM, PE IDs are global ranks, but we operate on local group ranks.
+        This mapping converts local group ranks to global PE IDs.
+
+        Args:
+            mesh: DeviceMesh for the context parallel group
+            device: Device to place the mapping tensor on
+
+        Returns:
+            Tensor of shape (world_size,) mapping group rank -> global rank
+        """
+        if mesh is self._cached_mesh and self._cached_group_to_global is not None:
+            return self._cached_group_to_global
+
+        group = mesh.get_group()
+        world_size = group.size()
+
+        # Build mapping: group_rank -> global_rank
+        group_to_global = torch.tensor(
+            [dist.get_global_rank(group, i) for i in range(world_size)],
+            dtype=torch.int32,
+            device=device,
+        )
+
+        # Cache for future calls
+        self._cached_mesh = mesh
+        self._cached_group_to_global = group_to_global
+
+        return group_to_global
 
     def gather(
         self,
@@ -736,6 +787,9 @@ class FlexCPMaskedGather:
             self._cached_valid_blocks = valid_blocks
             self._cached_block_size = block_size
 
+        # Get group-to-global rank mapping for NVSHMEM
+        group_to_global = self._get_group_to_global_mapping(mesh, device)
+
         # Allocate output tensors
         output_k = torch.empty(B, H, seqlen, hidden, device=device, dtype=dtype)
         output_v = torch.empty(B, H, seqlen, hidden, device=device, dtype=dtype)
@@ -750,6 +804,7 @@ class FlexCPMaskedGather:
             output_v,
             block_size,
             group_name,
+            group_to_global,
         )
 
         return output_k, output_v
