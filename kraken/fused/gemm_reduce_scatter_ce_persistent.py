@@ -25,7 +25,9 @@ def _matmul_launch_metadata(grid, kernel, args):
 _tma_desc_cache = {}
 
 
-def _create_2d_tma_descriptor(tensor: torch.Tensor, block_dim1: int, block_dim0: int) -> TensorDescriptor:
+def _create_2d_tma_descriptor(
+    tensor: torch.Tensor, block_dim1: int, block_dim0: int
+) -> TensorDescriptor:
     global _tma_desc_cache
     block_shape = [int(block_dim1), int(block_dim0)]
     key = (
