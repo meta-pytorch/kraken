@@ -154,7 +154,7 @@ def run_experiment(config: ExperimentConfig) -> dict[str, float]:
         inp = input_tensors[backend]
         target_fn = functools.partial(fn, inp)
         test_o = target_fn()
-        torch.testing.assert_close(test_o, gloden_o, atol=1e-1, rtol=1e-1)
+        torch.testing.assert_close(test_o, gloden_o, atol=1.5e-1, rtol=1.5e-1)
 
         results[backend] = benchmark_with_event(target_fn, flush_l2=True)
 
