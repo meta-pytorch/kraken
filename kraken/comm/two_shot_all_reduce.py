@@ -119,14 +119,12 @@ def two_shot_all_reduce(tensor: torch.Tensor, **kwargs) -> torch.Tensor:
         "num_warps": kwargs.get("num_warps", 32),
         "BLOCK_SIZE": kwargs.get("BLOCK_SIZE", 2048),
     }
+    group = kwargs.get("group", dist.group.WORLD)
 
-    # Create symmetric memory buffer for two-shot operation
-    symm_mem_buffer = symm_mem.empty(
-        tensor.shape,
-        dtype=tensor.dtype,
-        device=tensor.device,
+    symm_mem_hdl = symm_mem.get_symm_mem_workspace(
+        group.group_name,
+        tensor.numel() * tensor.element_size(),
     )
-    symm_mem_hdl = symm_mem.rendezvous(symm_mem_buffer, group=dist.group.WORLD)
     output = torch.empty_like(tensor)
 
     world_size = symm_mem_hdl.world_size
